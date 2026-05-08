@@ -41,6 +41,11 @@
     const btnClearFolder = $('#btn-clear-folder');
     const folderActions = $('#folder-actions');
 
+    const folderSubscriptionSection = $('#folder-subscription-section');
+    const folderSubscriptionTree = $('#folder-subscription-tree');
+    const folderSubscriptionStatus = $('#folder-subscription-status');
+    const btnRefreshFolderTree = $('#btn-refresh-folder-tree');
+
     const toastContainer = $('#toast-container');
 
     // ================================================================
@@ -53,6 +58,9 @@
     let selectedFolderId = null;
     let bookmarkTree = null;
     let syncFolderMap = {};
+
+    // Folder subscription state
+    let currentSubscribedIds = [];
 
     // ================================================================
     // Helper — send message to service worker
@@ -137,6 +145,7 @@
             // Show team and folder sections
             teamSection.style.display = '';
             folderSection.style.display = '';
+            folderSubscriptionSection.style.display = '';
         } else {
             authSignedOut.style.display = '';
             authSignedIn.style.display = 'none';
@@ -146,6 +155,7 @@
             // Hide team and folder sections
             teamSection.style.display = 'none';
             folderSection.style.display = 'none';
+            folderSubscriptionSection.style.display = 'none';
         }
     }
 
@@ -274,6 +284,8 @@
             currentTeamId = teamId;
             renderTeamList();
             showToast('Team activated!', 'success');
+            // Refresh subscription picker for new active team
+            loadFolderSubscriptions().catch(() => {});
         } catch (err) {
             showToast('Failed to activate team: ' + err.message, 'error');
         }
@@ -528,6 +540,184 @@
     });
 
     // ================================================================
+    // Folder Subscriptions
+    // ================================================================
+
+    /**
+     * Load the folder subscription section.
+     * Fetches the team folder tree from Supabase and the current
+     * subscribed IDs, then renders the checkbox tree.
+     */
+    async function loadFolderSubscriptions() {
+        if (!currentSession || !currentTeamId) return;
+
+        folderSubscriptionSection.style.display = '';
+        folderSubscriptionTree.innerHTML = '<div class="loading-state"><span class="spinner"></span> Loading team folders…</div>';
+        folderSubscriptionStatus.textContent = '';
+
+        try {
+            // Fetch both in parallel
+            const [foldersResult, subscribedIds] = await Promise.all([
+                sendMessage('getTeamFolderTree', { teamId: currentTeamId }),
+                sendMessage('getSubscribedFolderIds', { teamId: currentTeamId })
+            ]);
+
+            currentSubscribedIds = Array.isArray(subscribedIds) ? subscribedIds : [];
+            const folders = (foldersResult && foldersResult.folders) ? foldersResult.folders : [];
+
+            renderFolderSubscriptionTree(folders);
+        } catch (err) {
+            console.error('[TeamMarks Settings] Failed to load folder subscriptions:', err);
+            folderSubscriptionTree.innerHTML = `<div class="error-banner">Failed to load team folders: ${escapeHtml(err.message)}</div>`;
+        }
+    }
+
+    /**
+     * Build a nested <ul>/<li>/<input type=checkbox> tree from a flat folder array.
+     * Folders sorted: parent-less first (by title), then children within each level.
+     *
+     * @param {Array<{id: string, title: string, parent_id: string|null}>} folders
+     */
+    function renderFolderSubscriptionTree(folders) {
+        if (!folders || folders.length === 0) {
+            folderSubscriptionTree.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state__icon">📁</div>
+                    <div class="empty-state__text">No folders in this team.</div>
+                </div>`;
+            return;
+        }
+
+        // Group by parent_id for tree building
+        const byParent = new Map();
+        for (const folder of folders) {
+            const pid = folder.parent_id || null;
+            if (!byParent.has(pid)) byParent.set(pid, []);
+            byParent.get(pid).push(folder);
+        }
+
+        // Sort each group by title
+        for (const children of byParent.values()) {
+            children.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+        }
+
+        const ul = buildFolderSubtreeUl(byParent, null);
+        folderSubscriptionTree.innerHTML = '';
+        folderSubscriptionTree.appendChild(ul);
+
+        // Bind checkbox change handlers
+        folderSubscriptionTree.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+            cb.addEventListener('change', () => onFolderCheckboxChange(cb));
+        });
+
+        if (currentSubscribedIds.length === 0) {
+            folderSubscriptionStatus.textContent = 'Syncing entire team (no folder selected).';
+        } else {
+            folderSubscriptionStatus.textContent = `${currentSubscribedIds.length} folder(s) selected.`;
+        }
+    }
+
+    /**
+     * Recursively build a <ul> for a given parent level.
+     *
+     * @param {Map} byParent - parent_id → folder[]
+     * @param {string|null} parentId - current level's parent
+     * @returns {HTMLUListElement}
+     */
+    function buildFolderSubtreeUl(byParent, parentId) {
+        const ul = document.createElement('ul');
+        ul.style.listStyle = 'none';
+        ul.style.paddingLeft = parentId === null ? '0' : '20px';
+        ul.style.margin = '4px 0';
+
+        const children = byParent.get(parentId) || [];
+        for (const folder of children) {
+            const li = document.createElement('li');
+            li.style.margin = '4px 0';
+
+            const label = document.createElement('label');
+            label.style.display = 'flex';
+            label.style.alignItems = 'center';
+            label.style.gap = '8px';
+            label.style.cursor = 'pointer';
+            label.style.fontSize = '14px';
+
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.dataset.supabaseId = folder.id;
+            cb.checked = currentSubscribedIds.includes(folder.id);
+
+            const icon = document.createTextNode('📁 ');
+            const name = document.createTextNode(folder.title || '(unnamed)');
+
+            label.appendChild(cb);
+            label.appendChild(icon);
+            label.appendChild(name);
+            li.appendChild(label);
+
+            // Recurse for children
+            if (byParent.has(folder.id)) {
+                li.appendChild(buildFolderSubtreeUl(byParent, folder.id));
+            }
+
+            ul.appendChild(li);
+        }
+
+        return ul;
+    }
+
+    /**
+     * Handle a folder checkbox change event.
+     * Sends subscribeFolder or unsubscribeFolder message and refreshes state.
+     *
+     * @param {HTMLInputElement} cb
+     */
+    async function onFolderCheckboxChange(cb) {
+        const supabaseId = cb.dataset.supabaseId;
+        if (!supabaseId || !currentTeamId) return;
+
+        cb.disabled = true;
+        folderSubscriptionStatus.textContent = cb.checked ? 'Subscribing…' : 'Unsubscribing…';
+
+        try {
+            if (cb.checked) {
+                await sendMessage('subscribeFolder', { teamId: currentTeamId, supabaseFolderId: supabaseId });
+                if (!currentSubscribedIds.includes(supabaseId)) {
+                    currentSubscribedIds = [...currentSubscribedIds, supabaseId];
+                }
+            } else {
+                await sendMessage('unsubscribeFolder', { teamId: currentTeamId, supabaseFolderId: supabaseId });
+                currentSubscribedIds = currentSubscribedIds.filter(id => id !== supabaseId);
+            }
+
+            if (currentSubscribedIds.length === 0) {
+                folderSubscriptionStatus.textContent = 'Syncing entire team (no folder selected).';
+            } else {
+                folderSubscriptionStatus.textContent = `${currentSubscribedIds.length} folder(s) selected.`;
+            }
+        } catch (err) {
+            showToast('Failed to update subscription: ' + err.message, 'error');
+            // Revert checkbox state
+            cb.checked = !cb.checked;
+            folderSubscriptionStatus.textContent = 'Error updating subscription.';
+        } finally {
+            cb.disabled = false;
+        }
+    }
+
+    // Refresh button re-fetches and re-renders
+    btnRefreshFolderTree.addEventListener('click', async () => {
+        setLoading(btnRefreshFolderTree, true);
+        try {
+            await loadFolderSubscriptions();
+        } catch (_) {
+            // already handled inside loadFolderSubscriptions
+        } finally {
+            setLoading(btnRefreshFolderTree, false);
+        }
+    });
+
+    // ================================================================
     // Utilities
     // ================================================================
 
@@ -561,6 +751,11 @@
 
             // Render the folder picker even if bookmark tree failed
             renderFolderPicker();
+
+            // Load folder subscriptions (non-blocking)
+            loadFolderSubscriptions().catch(err => {
+                console.warn('[TeamMarks Settings] Folder subscriptions loading failed:', err);
+            });
         }
     }
 

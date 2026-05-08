@@ -113,6 +113,26 @@
                 <button id="btn-clear-folder" class="btn btn--secondary" style="margin-left:8px;">Clear mapping</button>
             </div>
         </section>
+
+        <!-- Folder Subscription Section -->
+        <section id="folder-subscription-section" class="section" style="display:none;">
+            <div class="section__header">
+                <h2 class="section__title">Subscribed Folders</h2>
+                <button id="btn-refresh-folder-tree" class="btn btn--small btn--secondary">Refresh</button>
+            </div>
+
+            <p style="font-size:14px; color:var(--color-text-secondary); margin-bottom:12px;">
+                Choose which team folders to sync locally. Leave all unchecked to sync the entire team.
+            </p>
+
+            <div id="folder-subscription-status" style="font-size:13px; color:var(--color-text-secondary); margin-bottom:8px;"></div>
+
+            <div id="folder-subscription-tree">
+                <div class="loading-state">
+                    <span class="spinner"></span> Loading team folders…
+                </div>
+            </div>
+        </section>
     </div>
 
     <!-- Toast container -->
