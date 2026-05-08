@@ -53,7 +53,7 @@ const SyncEngine = (() => {
     /** @type {string|null} UUID of the currently syncing team */
     let _currentTeamId = null;
 
-    /** @type {string|null} Chrome bookmark folder ID for the team root (replaces _currentFolderId) */
+    /** @type {string|null} Chrome bookmark folder ID for the team root */
     let _teamRootFolderId = null;
 
     /** @type {Set<string>} Chrome IDs of subscribed subtree roots */
@@ -1480,6 +1480,9 @@ const SyncEngine = (() => {
             }
         }
 
+        // Load ID map FIRST so subscribed Chrome folder lookups below are up-to-date
+        await _loadIdMap();
+
         // Load subscribed folder IDs and populate Chrome + Supabase Sets
         _subscribedChromeFolderIds = new Set();
         _subscribedSupabaseFolderIds = new Set();
@@ -1498,9 +1501,6 @@ const SyncEngine = (() => {
         } catch (err) {
             console.warn('[TeamMarks Sync] Failed to load subscribed folders:', err);
         }
-
-        // Reload ID map for this team
-        await _loadIdMap();
 
         // Subscribe to Supabase Realtime
         await _subscribeToRealtime();
@@ -1611,6 +1611,7 @@ const SyncEngine = (() => {
         // Exposed for SW handlers (subscribe/unsubscribe flows)
         enqueueSyncOp: _enqueueSyncOp,
         getChromeId: _getChromeId,
+        addIdMapping: _addIdMapping,
         removeIdMappingByChromeId: _removeIdMappingByChromeId
     });
 })();

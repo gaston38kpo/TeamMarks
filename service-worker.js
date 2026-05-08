@@ -366,7 +366,7 @@ async function handleMessage(message, sender) {
                 return { success: false, error: error.message };
             }
 
-            return { success: true, data: { folders: data || [] } };
+            return { success: true, data: data || [] };
         }
 
         case 'getSubscribedFolderIds': {
@@ -391,6 +391,41 @@ async function handleMessage(message, sender) {
             const current = await TeamManagement.getSubscribedFolders(teamId);
             if (!current.includes(supabaseFolderId)) {
                 await TeamManagement.setSubscribedFolders(teamId, [...current, supabaseFolderId]);
+            }
+
+            // Ensure the Chrome folder exists under the team root before syncing
+            const existingChromeId = SyncEngine.getChromeId(supabaseFolderId);
+            if (!existingChromeId) {
+                // Fetch the folder title from Supabase so we can create it in Chrome
+                const supabase = createSupabaseClient();
+                if (supabase) {
+                    const { data: folderRecord, error: fetchErr } = await supabase
+                        .from('bookmarks')
+                        .select('title')
+                        .eq('id', supabaseFolderId)
+                        .single();
+
+                    if (fetchErr) {
+                        console.warn('[TeamMarks] subscribeFolder: could not fetch folder record:', fetchErr);
+                    } else if (folderRecord) {
+                        const syncStatus = SyncEngine.getStatus();
+                        // teamRootFolderId is not directly exposed; get it via the folder mapping
+                        const folderInfo = await TeamManagement.getTeamBookmarksFolder(teamId);
+                        const teamRootId = folderInfo ? folderInfo.chromeFolderId : null;
+                        if (teamRootId) {
+                            try {
+                                const newFolder = await chrome.bookmarks.create({
+                                    parentId: teamRootId,
+                                    title: folderRecord.title || ''
+                                });
+                                await SyncEngine.addIdMapping(newFolder.id, supabaseFolderId);
+                                console.info('[TeamMarks] subscribeFolder: created Chrome folder', newFolder.id, 'for', supabaseFolderId);
+                            } catch (createErr) {
+                                console.warn('[TeamMarks] subscribeFolder: could not create Chrome folder:', createErr);
+                            }
+                        }
+                    }
+                }
             }
 
             // Enqueue a fullSync so the subscribed subtree is pulled down

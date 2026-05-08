@@ -572,7 +572,7 @@
             ]);
 
             currentSubscribedIds = Array.isArray(subscribedIds) ? subscribedIds : [];
-            const folders = (foldersResult && foldersResult.folders) ? foldersResult.folders : [];
+            const folders = Array.isArray(foldersResult) ? foldersResult : [];
 
             renderFolderSubscriptionTree(folders);
         } catch (err) {
