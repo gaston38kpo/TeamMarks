@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <link rel="stylesheet" href="settings.css">
+    <title>TeamMarks — Settings</title>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="app-header__logo">T</div>
+            <div>
+                <h1 class="app-header__title">TeamMarks</h1>
+                <p class="app-header__subtitle">Sync bookmarks with your team</p>
+            </div>
+        </header>
+
+        <!-- Auth Section -->
+        <section id="auth-section" class="section">
+            <div class="section__header">
+                <h2 class="section__title">Account</h2>
+                <span id="auth-badge" class="section__badge section__badge--error">Not signed in</span>
+            </div>
+
+            <!-- Signed out -->
+            <div id="auth-signed-out">
+                <p style="font-size:14px; color:var(--color-text-secondary); margin-bottom:16px;">
+                    Sign in with your Google account to sync bookmarks with your team.
+                </p>
+                <button id="btn-sign-in" class="btn btn--primary">Sign in with Google</button>
+            </div>
+
+            <!-- Signed in -->
+            <div id="auth-signed-in" style="display:none;">
+                <div class="auth-section__user">
+                    <div id="user-avatar" class="auth-section__avatar">?</div>
+                    <div class="auth-section__info">
+                        <div id="user-name" class="auth-section__name"></div>
+                        <div id="user-email" class="auth-section__email"></div>
+                    </div>
+                </div>
+                <div class="auth-section__actions">
+                    <button id="btn-sign-out" class="btn btn--danger">Sign out</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- Team Management Section -->
+        <section id="team-section" class="section" style="display:none;">
+            <div class="section__header">
+                <h2 class="section__title">Teams</h2>
+            </div>
+
+            <!-- Team list -->
+            <div id="team-list-container">
+                <div class="loading-state">
+                    <span class="spinner"></span> Loading teams…
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- Create Team -->
+            <h3 style="font-size:14px; font-weight:600; margin-bottom:8px;">Create a Team</h3>
+            <div class="form-group">
+                <div class="form-row">
+                    <input id="input-team-name" class="input" type="text" placeholder="Team name">
+                    <button id="btn-create-team" class="btn btn--primary">Create</button>
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- Join Team -->
+            <h3 style="font-size:14px; font-weight:600; margin-bottom:8px;">Join a Team</h3>
+            <div class="form-group">
+                <div class="form-row">
+                    <input id="input-invite-code" class="input input--code" type="text" placeholder="ABC123" maxlength="6">
+                    <button id="btn-join-team" class="btn btn--secondary">Join</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- Sync Folder Picker Section -->
+        <section id="folder-section" class="section" style="display:none;">
+            <div class="section__header">
+                <h2 class="section__title">Sync Folder</h2>
+            </div>
+
+            <!-- Current mapping -->
+            <div id="current-mapping" class="mapping-display" style="display:none;">
+                <span id="mapping-team" class="mapping-display__team"></span>
+                <span class="mapping-display__arrow">→</span>
+                <span id="mapping-folder" class="mapping-display__folder"></span>
+            </div>
+
+            <p style="font-size:14px; color:var(--color-text-secondary); margin-bottom:12px;">
+                Choose which local bookmark folder syncs with your active team. All bookmarks inside this folder will be synced.
+            </p>
+
+            <!-- Folder tree -->
+            <div id="folder-picker" class="folder-picker">
+                <div class="loading-state">
+                    <span class="spinner"></span> Loading bookmarks…
+                </div>
+            </div>
+
+            <div id="folder-actions" style="margin-top:12px; display:none;">
+                <button id="btn-select-folder" class="btn btn--primary" disabled>Select this folder</button>
+                <button id="btn-clear-folder" class="btn btn--secondary" style="margin-left:8px;">Clear mapping</button>
+            </div>
+        </section>
+    </div>
+
+    <!-- Toast container -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <script src="settings.js"></script>
+</body>
+</html>
