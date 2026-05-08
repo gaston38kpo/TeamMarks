@@ -1,68 +1,111 @@
 <div align="center">
-    <img src="https://raw.githubusercontent.com/SimGus/chrome-addon-v3-starter/master/logo/logo-128.png"/>
+    <img src="logo/logo-128.png"/>
     <h1>TeamMarks</h1>
     <h3>Sync bookmark folders with your team — in real time</h3>
 </div>
 
-TeamMarks is a Chrome extension that keeps bookmark folders synchronized across team members using Supabase as the sync backend.
-
-When one teammate adds, moves, or deletes a bookmark, everyone else sees the change in seconds. No more shared documents full of links — just a regular bookmark folder that stays in sync.
+TeamMarks is a Chrome Extension (Manifest V3) that keeps bookmark folders synchronized across team members using Supabase as the backend. When one teammate adds, moves, or deletes a bookmark, everyone else sees the change in seconds.
 
 ## Features
 
-- **Google Sign-In** — authenticate with your Google account via `chrome.identity`
-- **Team-based sync** — join a team with an invite code, pick a bookmark folder, and sync
-- **Real-time updates** — changes propagate instantly via Supabase Realtime
-- **Conflict resolution** — last-write-wins with soft deletes; edit beats delete
-- **Works offline** — service worker catches up on missed changes when it reconnects
+- **Google Sign-In** — one-click auth via `chrome.identity`, no passwords
+- **Team management** — create or join teams with an invite code
+- **Real-time sync** — changes propagate instantly via Supabase Realtime
+- **Conflict resolution** — last-write-wins; edit always beats delete
+- **Offline resilience** — service worker catches up on missed changes when it reconnects
 
-## Installation
+## Prerequisites
 
-1. **Open [the extensions page](chrome://extensions)** in your browser.
-2. **Toggle "Developer mode"** (top right).
-3. **Click "Load unpacked"** and select this project's root folder.
-4. The TeamMarks extension should appear in the list.
+- [Supabase](https://supabase.com) project with Google Auth enabled
+- [Supabase CLI](https://supabase.com/docs/guides/cli) (for deploying the Edge Function)
+- A Google OAuth 2.0 **Web application** client (Client ID + Secret)
 
-## Configuration
+## Setup
 
-Before using TeamMarks, you need a Supabase project:
+### 1. Database
 
-1. Create a project at [supabase.com](https://supabase.com).
-2. Enable Google as an authentication provider in your Supabase project settings.
-3. Copy your project URL and anon key into `lib/config.js`.
-4. Run `supabase-schema.sql` in the Supabase SQL editor to create the required tables.
-5. Download the Supabase JS client bundle:
-   - **PowerShell**: `pwsh -File scripts/download-supabase.ps1`
-   - **Bash**: `bash scripts/download-supabase.sh`
-   - **Manual**: Download from https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js and save as `lib/supabase-browser.js`
+Run `supabase-schema.sql` in the [Supabase SQL editor](https://supabase.com/dashboard) to create the required tables, RLS policies, and helper functions.
 
-## Development
+### 2. Edge Function
 
-This is a Manifest V3 extension with **no bundler, no npm, no TypeScript** — pure JavaScript loaded via `importScripts()` in the service worker.
+The Google OAuth token exchange runs server-side to keep the Client Secret out of the extension bundle.
+
+```bash
+supabase login
+supabase link --project-ref <your-project-ref>
+
+supabase secrets set GOOGLE_CLIENT_ID="<your-client-id>"
+supabase secrets set GOOGLECLIENTSECRET="<your-client-secret>"
+
+supabase functions deploy google-token-exchange
+```
+
+### 3. Extension config
+
+Edit `lib/config.js` with your Supabase project credentials:
+
+```js
+const url = 'https://<your-project-ref>.supabase.co';
+return {
+    url,
+    edgeFunctionUrl: `${url}/functions/v1`,
+    anonKey: '<your-anon-key>',
+    channelName: 'teammarks-sync'
+};
+```
+
+### 4. Supabase JS client
+
+Download the client bundle (required — not installed via npm):
+
+```bash
+# PowerShell
+pwsh -File scripts/download-supabase.ps1
+
+# Bash
+bash scripts/download-supabase.sh
+```
+
+### 5. Load the extension
+
+1. Open `chrome://extensions`
+2. Enable **Developer mode**
+3. Click **Load unpacked** → select this folder
+
+## Project structure
 
 ```
-├── manifest.json          Extension configuration
-├── service-worker.js      Entry point — orchestrates all modules
-├── auth.js                Google OAuth → Supabase Auth flow
+├── manifest.json               Extension config, permissions, OAuth client ID
+├── service-worker.js           Entry point — orchestrates all modules
+├── auth.js                     Google OAuth → Supabase Auth flow
+├── sync-engine.js              Bidirectional bookmark sync (Chrome ↔ Supabase)
+├── conflict-resolution.js      Last-write-wins conflict resolver
+├── team-management.js          Create / join / leave teams
 ├── lib/
-│   ├── config.js          Supabase URL and anon key (edit this)
-│   ├── supabase-browser.js Supabase JS client bundle (download via scripts/)
-│   └── supabase.js        Supabase client wrapper (uses the bundle)
-├── scripts/
-│   ├── download-supabase.ps1  Download script (PowerShell)
-│   └── download-supabase.sh   Download script (Bash)
-├── popup/                 Extension popup UI
-├── settings/              Extension options page
-└── supabase-schema.sql    Database schema (run in Supabase dashboard)
+│   ├── config.js               Supabase URL and anon key (edit this)
+│   ├── supabase.js             Supabase client wrapper
+│   └── supabase-browser.js     Supabase JS bundle (downloaded via scripts/)
+├── supabase/
+│   └── functions/
+│       └── google-token-exchange/
+│           └── index.ts        Edge Function — OAuth token exchange proxy
+├── popup/                      Extension popup UI
+├── settings/                   Extension options page
+├── scripts/                    Supabase JS download helpers
+└── supabase-schema.sql         Database schema, RLS policies, helper functions
 ```
 
 ## Architecture
 
-- **Auth**: `chrome.identity.getAuthToken()` → Supabase Auth (Google provider) for zero-friction login.
-- **Sync engine**: Chrome bookmark events → push to Supabase; Supabase Realtime → apply locally.
-- **Echo guard**: Programmatic writes set a flag in `chrome.storage.local` so they don't trigger a push back to the server.
-- **Service worker**: Designed for ephemeral operation — reconnects and catches up on every wake.
-- **Conflict resolution**: Last-write-wins with soft deletes. If one person deletes and another edits, the edit wins.
+| Layer | Approach |
+|-------|----------|
+| **Auth** | `launchWebAuthFlow` → auth code → Edge Function proxy → `supabase.auth.signInWithIdToken` |
+| **Token exchange** | Supabase Edge Function (Deno) — Client Secret never touches the extension bundle |
+| **Sync** | Chrome bookmark events → Supabase; Supabase Realtime → apply locally |
+| **Conflict resolution** | Last-write-wins via `updated_at` timestamp; `applyDiff` runs on every full sync |
+| **Echo guard** | Programmatic writes set a counter in `chrome.storage.local` to suppress re-sync loops |
+| **Service worker** | Ephemeral by design — reconnects and catches up on every wake via `fullSync` |
+| **No bundler** | Pure JS loaded via `importScripts()`. No npm, no TypeScript, no build step |
 
 ## License
 
