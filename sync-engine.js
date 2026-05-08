@@ -53,8 +53,20 @@ const SyncEngine = (() => {
     /** @type {string|null} UUID of the currently syncing team */
     let _currentTeamId = null;
 
-    /** @type {string|null} Chrome bookmark folder ID for the sync root */
-    let _currentFolderId = null;
+    /** @type {string|null} Chrome bookmark folder ID for the team root (replaces _currentFolderId) */
+    let _teamRootFolderId = null;
+
+    /** @type {Set<string>} Chrome IDs of subscribed subtree roots */
+    let _subscribedChromeFolderIds = new Set();
+
+    /** @type {Set<string>} Supabase IDs of subscribed folders + all descendants */
+    let _subscribedSupabaseFolderIds = new Set();
+
+    /** @type {Map<string, string|null>} supabaseId → parent_id for all remote folders */
+    let _remoteParentMap = new Map();
+
+    /** @type {Promise<any>} Serial operation queue — serializes fullSync, subscribe, unsubscribe */
+    let _syncQueue = Promise.resolve();
 
     /** @type {object|null} Supabase Realtime channel subscription */
     let _realtimeChannel = null;
@@ -204,6 +216,25 @@ const SyncEngine = (() => {
     }
 
     // ---------------------------------------------------------------
+    // Private helpers — Serial sync queue
+    // ---------------------------------------------------------------
+
+    /**
+     * Enqueue a sync operation onto the serial Promise queue.
+     * This ensures fullSync, subscribe, and unsubscribe operations
+     * run one at a time and never interleave.
+     *
+     * @param {Function} fn - Async function to run in sequence
+     * @returns {Promise<any>}
+     */
+    function _enqueueSyncOp(fn) {
+        _syncQueue = _syncQueue.then(() => fn()).catch(err => {
+            console.error('[TeamMarks Sync] Queued sync op failed:', err);
+        });
+        return _syncQueue;
+    }
+
+    // ---------------------------------------------------------------
     // Private helpers — ID mapping
     // ---------------------------------------------------------------
 
@@ -296,21 +327,36 @@ const SyncEngine = (() => {
     // ---------------------------------------------------------------
 
     /**
-     * Check whether a Chrome bookmark is inside the current sync folder
-     * (directly or recursively).
+     * Check whether a Chrome bookmark is inside a subscribed sync subtree.
+     *
+     * When `_subscribedChromeFolderIds` is non-empty: walks up the Chrome ancestry
+     * and returns true if any ancestor is in the set.
+     * When the set is empty (full-team mode): falls back to checking ancestry
+     * against `_teamRootFolderId` — identical to original behavior.
+     *
      * @param {string} chromeId - The bookmark ID to check
      * @returns {Promise<boolean>}
      */
-    async function _isInSyncFolder(chromeId) {
-        if (!_currentFolderId) return false;
+    async function _isInSubscribedTree(chromeId) {
+        const rootId = _teamRootFolderId;
+        if (!rootId) return false;
+
+        // Choose which set to check: subscribed roots, or just the team root
+        const checkSet = _subscribedChromeFolderIds.size > 0
+            ? _subscribedChromeFolderIds
+            : null;
 
         let currentId = chromeId;
-        const maxDepth = 20; // Safety guard against infinite loops
+        const maxDepth = 20;
 
         for (let i = 0; i < maxDepth; i++) {
-            if (currentId === _currentFolderId) return true;
+            // Full-team mode: check against team root
+            if (!checkSet && currentId === rootId) return true;
+            // Selective mode: check if this ancestor is a subscribed root
+            if (checkSet && checkSet.has(currentId)) return true;
+            // Stop at the team root boundary (don't walk above it)
+            if (currentId === rootId) return false;
 
-            // Root folders can't have parents
             if (!currentId || currentId === '0') return false;
 
             try {
@@ -336,7 +382,7 @@ const SyncEngine = (() => {
         const results = [];
         const isFolder = !node.url; // Chrome folders have no url property
 
-        if (node.id !== _currentFolderId) {
+        if (node.id !== _teamRootFolderId) {
             // Only add non-root items
             results.push({
                 chromeId: node.id,
@@ -350,7 +396,7 @@ const SyncEngine = (() => {
 
         // Recurse into children if this is a folder
         if (isFolder && node.children) {
-            const childPath = node.id === _currentFolderId
+            const childPath = node.id === _teamRootFolderId
                 ? '/'
                 : (parentPath === '/' ? `/${node.title}` : `${parentPath}/${node.title}`);
 
@@ -374,7 +420,7 @@ const SyncEngine = (() => {
 
         // Resolve parent_id
         let parentId = null;
-        if (chromeBookmark.parentId && chromeBookmark.parentId !== _currentFolderId) {
+        if (chromeBookmark.parentId && chromeBookmark.parentId !== _teamRootFolderId) {
             parentId = _getSupabaseId(chromeBookmark.parentId) || null;
         }
 
@@ -398,9 +444,9 @@ const SyncEngine = (() => {
      */
     function _resolveChromeParentId(supabaseParentId) {
         if (!supabaseParentId) {
-            return _currentFolderId;
+            return _teamRootFolderId;
         }
-        return _getChromeId(supabaseParentId) || _currentFolderId;
+        return _getChromeId(supabaseParentId) || _teamRootFolderId;
     }
 
     // ---------------------------------------------------------------
@@ -422,7 +468,7 @@ const SyncEngine = (() => {
             return;
         }
 
-        const inFolder = await _isInSyncFolder(id);
+        const inFolder = await _isInSubscribedTree(id);
         if (!inFolder) return;
 
         console.info('[TeamMarks Sync] Local bookmark created:', bookmark.title || id);
@@ -488,7 +534,7 @@ const SyncEngine = (() => {
             return;
         }
 
-        const inFolder = await _isInSyncFolder(id);
+        const inFolder = await _isInSubscribedTree(id);
         if (!inFolder) return;
 
         const supabaseId = _getSupabaseId(id);
@@ -552,8 +598,8 @@ const SyncEngine = (() => {
         }
 
         // Check if the bookmark was moved INTO or OUT OF the sync folder
-        const wasInFolder = await _isInSyncFolder(moveInfo.oldParentId);
-        const isInFolder = await _isInSyncFolder(id);
+        const wasInFolder = await _isInSubscribedTree(moveInfo.oldParentId);
+        const isInFolder = await _isInSubscribedTree(id);
 
         if (!wasInFolder && !isInFolder) return; // Not our concern
 
@@ -600,7 +646,7 @@ const SyncEngine = (() => {
 
             const bookmark = nodes[0];
             const updateData = {
-                parent_id: bookmark.parentId === _currentFolderId
+                parent_id: bookmark.parentId === _teamRootFolderId
                     ? null
                     : (_getSupabaseId(bookmark.parentId) || null),
                 sort_order: moveInfo.index,
@@ -684,7 +730,7 @@ const SyncEngine = (() => {
             return;
         }
 
-        const inFolder = await _isInSyncFolder(id);
+        const inFolder = await _isInSubscribedTree(id);
         if (!inFolder) return;
 
         console.info('[TeamMarks Sync] Local bookmark children reordered:', id);
@@ -759,13 +805,37 @@ const SyncEngine = (() => {
     // ---------------------------------------------------------------
 
     /**
+     * Check whether a Supabase record (by ID and parent_id) is within a
+     * subscribed subtree, by walking _remoteParentMap upward.
+     *
+     * @param {string} id - The Supabase ID of the record
+     * @param {string|null} parentId - The parent_id of the record
+     * @returns {boolean}
+     */
+    function _isInSubscribedSupabaseTree(id, parentId) {
+        // Direct hit: the record itself is subscribed
+        if (_subscribedSupabaseFolderIds.has(id)) return true;
+
+        // Walk up the ancestor chain via _remoteParentMap
+        let currentId = parentId;
+        const maxDepth = 20;
+        for (let i = 0; i < maxDepth; i++) {
+            if (!currentId) return false;
+            if (_subscribedSupabaseFolderIds.has(currentId)) return true;
+            currentId = _remoteParentMap.get(currentId) || null;
+        }
+
+        return false;
+    }
+
+    /**
      * Handle a Supabase Realtime postgres_changes event.
      * @param {object} payload - Supabase Realtime payload
      */
     async function _handleRealtimeEvent(payload) {
         const { eventType, new: newRecord, old: oldRecord } = payload;
 
-        if (!_currentTeamId || !_currentFolderId) {
+        if (!_currentTeamId || !_teamRootFolderId) {
             console.debug('[TeamMarks Sync] Ignoring Realtime event — no active sync.');
             return;
         }
@@ -774,6 +844,20 @@ const SyncEngine = (() => {
         const recordTeamId = (newRecord && newRecord.team_id) || (oldRecord && oldRecord.team_id);
         if (recordTeamId && recordTeamId !== _currentTeamId) {
             return; // Not for our team
+        }
+
+        // Filter by subscribed subtrees (skip events outside subscribed folders)
+        // When _subscribedSupabaseFolderIds is empty, pass all events (full-team mode)
+        if (_subscribedSupabaseFolderIds.size > 0) {
+            const record = newRecord || oldRecord;
+            if (record) {
+                // Check if the record itself, or any ancestor via _remoteParentMap, is subscribed
+                const isSubscribed = _isInSubscribedSupabaseTree(record.id, record.parent_id);
+                if (!isSubscribed) {
+                    console.debug('[TeamMarks Sync] Discarding Realtime event — not in subscribed subtree:', record.id);
+                    return;
+                }
+            }
         }
 
         // Skip our own writes if possible (compare last_modified_by)
@@ -1087,6 +1171,40 @@ const SyncEngine = (() => {
     }
 
     /**
+     * Build the complete set of Supabase IDs (subscribed roots + all descendants)
+     * in a single O(n) pass using the remote folder list.
+     *
+     * @param {string[]} rootIds - Supabase IDs of subscribed folder roots
+     * @param {object[]} remoteFolders - All remote folder records (is_folder=true)
+     * @returns {Set<string>}
+     */
+    function _buildSubscribedDescendantSet(rootIds, remoteFolders) {
+        if (!rootIds || rootIds.length === 0) return new Set();
+
+        // Build parent → children map for O(n) DFS
+        const childrenMap = new Map();
+        for (const folder of remoteFolders) {
+            const pid = folder.parent_id || null;
+            if (!childrenMap.has(pid)) childrenMap.set(pid, []);
+            childrenMap.get(pid).push(folder.id);
+        }
+
+        const result = new Set();
+        const queue = [...rootIds];
+        while (queue.length > 0) {
+            const id = queue.pop();
+            if (result.has(id)) continue;
+            result.add(id);
+            const children = childrenMap.get(id) || [];
+            for (const childId of children) {
+                queue.push(childId);
+            }
+        }
+
+        return result;
+    }
+
+    /**
      * Perform a full catch-up sync:
      * 1. Pull all bookmarks for the current team from Supabase
      * 2. Get all Chrome bookmarks in the sync folder
@@ -1096,7 +1214,7 @@ const SyncEngine = (() => {
      * @returns {Promise<void>}
      */
     async function fullSync() {
-        if (!_currentTeamId || !_currentFolderId) {
+        if (!_currentTeamId || !_teamRootFolderId) {
             console.warn('[TeamMarks Sync] Cannot fullSync — no team or folder selected.');
             return;
         }
@@ -1122,7 +1240,7 @@ const SyncEngine = (() => {
             // 2. Get all Chrome bookmarks in the sync folder
             let localBookmarks = [];
             try {
-                const subtree = await chrome.bookmarks.getSubTree(_currentFolderId);
+                const subtree = await chrome.bookmarks.getSubTree(_teamRootFolderId);
                 if (subtree && subtree.length > 0) {
                     localBookmarks = _flattenBookmarkTree(subtree[0]);
                 }
@@ -1136,9 +1254,28 @@ const SyncEngine = (() => {
             const remoteFolderRecords = (remoteBookmarks || []).filter(bm => bm.is_folder);
             const pathMap = _buildRemotePathMap(remoteFolderRecords);
 
+            // Build _remoteParentMap: supabaseId → parent_id (all remote folders)
+            _remoteParentMap = new Map();
+            for (const folder of remoteFolderRecords) {
+                _remoteParentMap.set(folder.id, folder.parent_id || null);
+            }
+
+            // Build _subscribedSupabaseFolderIds: DFS from each subscribed root
+            // When _subscribedChromeFolderIds is empty → full-team mode → skip filter
+            _subscribedSupabaseFolderIds = new Set();
+            if (_subscribedChromeFolderIds.size > 0) {
+                // Map Chrome subscribed folder IDs to Supabase IDs via idMap
+                const subscribedSupabaseRoots = [];
+                for (const chromeId of _subscribedChromeFolderIds) {
+                    const supabaseId = _getSupabaseId(chromeId);
+                    if (supabaseId) subscribedSupabaseRoots.push(supabaseId);
+                }
+                _subscribedSupabaseFolderIds = _buildSubscribedDescendantSet(subscribedSupabaseRoots, remoteFolderRecords);
+            }
+
             // Map remote bookmarks to a format applyDiff expects,
             // resolving parent_path from the folder path map
-            const remoteChanges = (remoteBookmarks || []).map(bm => ({
+            let remoteChanges = (remoteBookmarks || []).map(bm => ({
                 id: bm.id,
                 url: bm.url,
                 title: bm.title,
@@ -1149,6 +1286,14 @@ const SyncEngine = (() => {
                 deleted_at: bm.deleted_at,
                 parent_path: bm.parent_id ? (pathMap.get(bm.parent_id) || '/') : '/'
             }));
+
+            // Filter to subscribed subtrees when in selective mode
+            // (when _subscribedSupabaseFolderIds is empty → full-team mode → no filter)
+            if (_subscribedSupabaseFolderIds.size > 0) {
+                remoteChanges = remoteChanges.filter(bm =>
+                    _isInSubscribedSupabaseTree(bm.id, bm.parent_id)
+                );
+            }
 
             // Map local bookmarks with their parent paths
             const localItems = localBookmarks.map(bm => ({
@@ -1235,7 +1380,7 @@ const SyncEngine = (() => {
                             const nodes = await chrome.bookmarks.get(local.chromeId);
                             if (nodes && nodes.length > 0) {
                                 // Only push if it's still in the sync folder
-                                if (await _isInSyncFolder(local.chromeId)) {
+                                if (await _isInSubscribedTree(local.chromeId)) {
                                     await _onBookmarkCreated(local.chromeId, nodes[0]);
                                 }
                             }
@@ -1321,18 +1466,37 @@ const SyncEngine = (() => {
 
         _currentTeamId = teamId;
 
-        // Resolve the sync folder
+        // Resolve the sync folder (team root)
         if (folderId) {
-            _currentFolderId = folderId;
+            _teamRootFolderId = folderId;
         } else {
             const folderInfo = await TeamManagement.getTeamBookmarksFolder(teamId);
             if (folderInfo && folderInfo.chromeFolderId) {
-                _currentFolderId = folderInfo.chromeFolderId;
+                _teamRootFolderId = folderInfo.chromeFolderId;
             } else {
                 // No folder mapped yet — sync will be limited until folder is set
                 console.warn('[TeamMarks Sync] No bookmark folder mapped for team. Sync will be limited.');
-                _currentFolderId = null;
+                _teamRootFolderId = null;
             }
+        }
+
+        // Load subscribed folder IDs and populate Chrome + Supabase Sets
+        _subscribedChromeFolderIds = new Set();
+        _subscribedSupabaseFolderIds = new Set();
+        _remoteParentMap = new Map();
+        try {
+            const subscribedIds = await TeamManagement.getSubscribedFolders(teamId);
+            for (const supabaseId of subscribedIds) {
+                const chromeId = _getChromeId(supabaseId);
+                if (chromeId) {
+                    _subscribedChromeFolderIds.add(chromeId);
+                }
+            }
+            // _subscribedSupabaseFolderIds will be fully rebuilt on the first fullSync
+            console.info('[TeamMarks Sync] Loaded', _subscribedChromeFolderIds.size,
+                'subscribed Chrome folder(s) from', subscribedIds.length, 'subscription(s).');
+        } catch (err) {
+            console.warn('[TeamMarks Sync] Failed to load subscribed folders:', err);
         }
 
         // Reload ID map for this team
@@ -1344,7 +1508,7 @@ const SyncEngine = (() => {
         _isSyncing = true;
         _isConnected = true;
 
-        console.info('[TeamMarks Sync] Sync started for team:', teamId, 'folder:', _currentFolderId || '(none)');
+        console.info('[TeamMarks Sync] Sync started for team:', teamId, 'folder:', _teamRootFolderId || '(none)');
 
         // Run a full sync to catch up on any missed changes
         try {
@@ -1366,7 +1530,10 @@ const SyncEngine = (() => {
         await _unsubscribeFromRealtime();
 
         _currentTeamId = null;
-        _currentFolderId = null;
+        _teamRootFolderId = null;
+        _subscribedChromeFolderIds = new Set();
+        _subscribedSupabaseFolderIds = new Set();
+        _remoteParentMap = new Map();
         _isSyncing = false;
         _isConnected = false;
 
@@ -1425,6 +1592,7 @@ const SyncEngine = (() => {
         _idMap = { chromeToSupabase: {}, supabaseToChrome: {} };
         _lastSyncTimestamp = null;
         _lastError = null;
+        _syncQueue = Promise.resolve();
         _initialized = false;
 
         console.info('[TeamMarks Sync] Destroyed.');
