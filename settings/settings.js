@@ -216,10 +216,19 @@
             console.warn('[TeamMarks Settings] Failed to load sync status:', err);
         }
 
-        // Load sync folder mappings
+        // Load sync folder mappings and normalize legacy string values
         try {
             const result = await chrome.storage.local.get('teammarks_syncFolders');
-            syncFolderMap = result.teammarks_syncFolders || {};
+            const raw = result.teammarks_syncFolders || {};
+            // Normalize: legacy values may be plain strings
+            syncFolderMap = {};
+            for (const [tid, val] of Object.entries(raw)) {
+                if (typeof val === 'string') {
+                    syncFolderMap[tid] = val;
+                } else if (val && val.chromeFolderId) {
+                    syncFolderMap[tid] = val.chromeFolderId;
+                }
+            }
         } catch (err) {
             console.warn('[TeamMarks Settings] Failed to load sync folder map:', err);
             syncFolderMap = {};
