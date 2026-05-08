@@ -94,3 +94,13 @@ Pre-digested rules per skill. Delegators copy matching blocks into sub-agent pro
 ## Project Conventions
 
 No project convention files found (no AGENTS.md, CLAUDE.md, .cursorrules, GEMINI.md, or copilot-instructions.md).
+
+## Project Context (TeamMarks)
+
+- **Stack**: Chrome Extension MV3, Vanilla JS, Supabase (Realtime + REST), Google OAuth2
+- **No build tool** — plain JS, no bundler, no TypeScript
+- **No test framework** — strict TDD mode: disabled
+- **Key files**: service-worker.js, sync-engine.js, conflict-resolution.js, team-management.js, auth.js
+- **Schema**: supabase-schema.sql, supabase/functions/
+- **SDD Persistence**: engram (topic: sdd-init/teammarks, obs #57)
+- **Testing capabilities**: engram (topic: sdd/teammarks/testing-capabilities, obs #58)

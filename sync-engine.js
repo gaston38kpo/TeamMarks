@@ -1147,7 +1147,7 @@ const SyncEngine = (() => {
                 sort_order: bm.sort_order,
                 updated_at: bm.updated_at,
                 deleted_at: bm.deleted_at,
-                parent_path: bm.parent_id ? (pathMap.get(bm.parent_id) || '/') : ''
+                parent_path: bm.parent_id ? (pathMap.get(bm.parent_id) || '/') : '/'
             }));
 
             // Map local bookmarks with their parent paths
@@ -1182,9 +1182,23 @@ const SyncEngine = (() => {
                             await _applyRemoteInsert(action.remote);
                             break;
 
-                        case 'update':
+                        case 'update': {
+                            // If the local chrome node exists but is mapped to a *different*
+                            // Supabase ID (two devices independently created the same-named
+                            // folder), reconcile by pointing the local node to the remote ID.
+                            // This prevents _applyRemoteUpdate from falling through to insert
+                            // and creating a duplicate folder.
+                            const localChromeId = action.local && action.local.chromeId;
+                            if (localChromeId && !_getChromeId(action.remote.id)) {
+                                const staleSupabaseId = _getSupabaseId(localChromeId);
+                                if (staleSupabaseId && staleSupabaseId !== action.remote.id) {
+                                    await _removeIdMappingBySupabaseId(staleSupabaseId);
+                                }
+                                await _addIdMapping(localChromeId, action.remote.id);
+                            }
                             await _applyRemoteUpdate(action.remote, action.local);
                             break;
+                        }
 
                         case 'keep-local':
                             // Local wins (LWW) — no action needed
