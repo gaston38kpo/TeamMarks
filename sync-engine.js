@@ -1607,6 +1607,10 @@ const SyncEngine = (() => {
         syncNow,
         getStatus,
         onStatusChange,
-        destroy
+        destroy,
+        // Exposed for SW handlers (subscribe/unsubscribe flows)
+        enqueueSyncOp: _enqueueSyncOp,
+        getChromeId: _getChromeId,
+        removeIdMappingByChromeId: _removeIdMappingByChromeId
     });
 })();

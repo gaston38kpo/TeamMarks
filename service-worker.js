@@ -21,6 +21,10 @@
  *   getBookmarkTree → chrome.bookmarks.getTree()
  *   syncStatus     → SyncEngine.getStatus()
  *   manualSync     → SyncEngine.fullSync()
+ *   getTeamFolderTree → Query Supabase for team's folder list [{id, title, parent_id}]
+ *   getSubscribedFolderIds → TeamManagement.getSubscribedFolders(teamId)
+ *   subscribeFolder → Add supabaseFolderId to subscriptions, rebuild, fullSync
+ *   unsubscribeFolder → Remove supabaseFolderId, remove Chrome subtree, clean idMap
  */
 
 importScripts(
@@ -334,6 +338,113 @@ async function handleMessage(message, sender) {
             return { success: true, data: { teamId: tid, folderId: fid || null } };
         }
 
+        // ── Folder Subscriptions ───────────────────────────
+
+        case 'getTeamFolderTree': {
+            // Returns flat array of Supabase folder records for the current team
+            const status = SyncEngine.getStatus();
+            const teamId = message.teamId || status.teamId;
+            if (!teamId) {
+                return { success: false, error: 'No active team.' };
+            }
+
+            const supabase = createSupabaseClient();
+            if (!supabase) {
+                return { success: false, error: 'Supabase client not available.' };
+            }
+
+            const { data, error } = await supabase
+                .from('bookmarks')
+                .select('id, title, parent_id')
+                .eq('team_id', teamId)
+                .eq('is_folder', true)
+                .is('deleted_at', null)
+                .order('title', { ascending: true });
+
+            if (error) {
+                console.error('[TeamMarks] getTeamFolderTree failed:', error);
+                return { success: false, error: error.message };
+            }
+
+            return { success: true, data: { folders: data || [] } };
+        }
+
+        case 'getSubscribedFolderIds': {
+            const status = SyncEngine.getStatus();
+            const teamId = message.teamId || status.teamId;
+            if (!teamId) {
+                return { success: false, error: 'No active team.' };
+            }
+            const ids = await TeamManagement.getSubscribedFolders(teamId);
+            return { success: true, data: ids };
+        }
+
+        case 'subscribeFolder': {
+            const status = SyncEngine.getStatus();
+            const teamId = message.teamId || status.teamId;
+            const { supabaseFolderId } = message;
+            if (!teamId || !supabaseFolderId) {
+                return { success: false, error: 'teamId and supabaseFolderId are required.' };
+            }
+
+            // Add to subscriptions
+            const current = await TeamManagement.getSubscribedFolders(teamId);
+            if (!current.includes(supabaseFolderId)) {
+                await TeamManagement.setSubscribedFolders(teamId, [...current, supabaseFolderId]);
+            }
+
+            // Enqueue a fullSync so the subscribed subtree is pulled down
+            SyncEngine.enqueueSyncOp(() => SyncEngine.fullSync());
+
+            return { success: true };
+        }
+
+        case 'unsubscribeFolder': {
+            const status = SyncEngine.getStatus();
+            const teamId = message.teamId || status.teamId;
+            const { supabaseFolderId } = message;
+            if (!teamId || !supabaseFolderId) {
+                return { success: false, error: 'teamId and supabaseFolderId are required.' };
+            }
+
+            // Enqueue the entire unsubscribe operation to avoid races
+            SyncEngine.enqueueSyncOp(async () => {
+                // 1. Remove from subscriptions
+                const ids = await TeamManagement.getSubscribedFolders(teamId);
+                await TeamManagement.setSubscribedFolders(teamId, ids.filter(id => id !== supabaseFolderId));
+
+                // 2. Find Chrome folder via idMap and remove subtree
+                const chromeId = SyncEngine.getChromeId(supabaseFolderId);
+                if (chromeId) {
+                    // Collect all descendant Chrome IDs before removal
+                    const allChromeIds = [];
+                    try {
+                        const subTree = await chrome.bookmarks.getSubTree(chromeId);
+                        if (subTree && subTree.length > 0) {
+                            collectChromeIds(subTree[0], allChromeIds);
+                        }
+                    } catch (err) {
+                        console.warn('[TeamMarks] getSubTree failed during unsubscribe:', err);
+                        allChromeIds.push(chromeId);
+                    }
+
+                    // Remove the Chrome subtree
+                    try {
+                        await chrome.bookmarks.removeTree(chromeId);
+                    } catch (err) {
+                        console.warn('[TeamMarks] removeTree failed during unsubscribe (continuing cleanup):', err);
+                    }
+
+                    // Clear all idMap entries
+                    for (const cid of allChromeIds) {
+                        await SyncEngine.removeIdMappingByChromeId(cid);
+                    }
+                }
+            });
+
+            return { success: true };
+        }
+
         default:
             console.warn('[TeamMarks] Unknown message action:', action);
             return { success: false, error: `Unknown action: ${action}` };
@@ -363,5 +474,21 @@ chrome.runtime.onInstalled.addListener((details) => {
 // ==============================================================
 // Initialize
 // ==============================================================
+
+/**
+ * Recursively collect all Chrome bookmark IDs from a subtree node.
+ * Used by the unsubscribeFolder handler to clean up idMap entries.
+ *
+ * @param {object} node - Chrome bookmark tree node
+ * @param {string[]} result - Accumulator array
+ */
+function collectChromeIds(node, result) {
+    result.push(node.id);
+    if (node.children) {
+        for (const child of node.children) {
+            collectChromeIds(child, result);
+        }
+    }
+}
 
 initTeamMarks();
