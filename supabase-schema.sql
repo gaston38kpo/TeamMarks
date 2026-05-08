@@ -20,7 +20,7 @@ CREATE TABLE teams (
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     slug TEXT UNIQUE NOT NULL,
-    invite_code TEXT UNIQUE NOT NULL DEFAULT substr(md5(random()::text), 1, 6),
+    invite_code TEXT UNIQUE NOT NULL DEFAULT UPPER(substr(md5(random()::text), 1, 6)),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -199,7 +199,7 @@ BEGIN
   RETURN QUERY
     SELECT t.id, t.name, NULL::TEXT AS description
     FROM teams t
-    WHERE t.invite_code = UPPER(TRIM(code));
+    WHERE UPPER(t.invite_code) = UPPER(TRIM(code));
 END;
 $$;
 
