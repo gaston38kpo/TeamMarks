@@ -15,7 +15,10 @@
  *   TeamManagement.getMyTeams()                     → Returns cached team list (sync)
  *   TeamManagement.refreshTeams()                   → Fetch teams from Supabase
  *   TeamManagement.getTeamMembers(teamId)          → List team members
- *   TeamManagement.getTeamBookmarksFolder(teamId)  → Get local Chrome folder mapping
+ *   TeamManagement.getTeamBookmarksFolder(teamId)  → Get local Chrome folder mapping (normalized)
+ *   TeamManagement.setTeamBookmarksFolder(teamId, folderId) → Set Chrome folder (new shape)
+ *   TeamManagement.getSubscribedFolders(teamId)    → Get subscribed Supabase folder IDs
+ *   TeamManagement.setSubscribedFolders(teamId, ids[]) → Set subscribed Supabase folder IDs
  *   TeamManagement.setCurrentTeam(teamId)           → Switch active team
  *   TeamManagement.getCurrentTeam()                 → Returns active team (sync)
  *
@@ -45,7 +48,10 @@ const TeamManagement = (() => {
     /** @type {string|null} UUID of the currently selected team */
     let _currentTeamId = null;
 
-    /** @type {object} Map of teamId → chromeFolderId from storage */
+    /**
+     * @type {object} Map of teamId → { chromeFolderId, subscribedFolderIds[] } from storage.
+     * Legacy values may still be plain strings (chromeFolderId only).
+     */
     let _syncFolders = {};
 
     // ---------------------------------------------------------------
@@ -464,11 +470,36 @@ const TeamManagement = (() => {
     }
 
     /**
+     * Normalize a raw storage entry for a team to the new object shape.
+     * Legacy format was a plain string (chromeFolderId only).
+     * New format: { chromeFolderId: string, subscribedFolderIds: string[] }
+     *
+     * @param {any} raw - Raw value from _syncFolders[teamId]
+     * @returns {{ chromeFolderId: string, subscribedFolderIds: string[] }|null}
+     */
+    function _normalizeFolderEntry(raw) {
+        if (!raw) return null;
+        // Legacy: plain string
+        if (typeof raw === 'string') {
+            return { chromeFolderId: raw, subscribedFolderIds: [] };
+        }
+        // New shape: object
+        if (typeof raw === 'object' && raw.chromeFolderId) {
+            return {
+                chromeFolderId: raw.chromeFolderId,
+                subscribedFolderIds: Array.isArray(raw.subscribedFolderIds) ? raw.subscribedFolderIds : []
+            };
+        }
+        return null;
+    }
+
+    /**
      * Get the Chrome bookmark folder ID mapped to a team.
      * This is stored in chrome.storage.local under the key 'teammarks_syncFolders'.
+     * Normalizes legacy plain-string values on read.
      *
      * @param {string} teamId - UUID of the team
-     * @returns {Promise<{chromeFolderId: string}|null>} The folder mapping, or null
+     * @returns {Promise<{chromeFolderId: string, subscribedFolderIds: string[]}|null>}
      */
     async function getTeamBookmarksFolder(teamId) {
         if (!teamId) return null;
@@ -479,10 +510,7 @@ const TeamManagement = (() => {
             _syncFolders = result[STORAGE_KEY_SYNC_FOLDERS] || {};
         } catch (_) { /* use cached value */ }
 
-        const folderId = _syncFolders[teamId];
-        if (!folderId) return null;
-
-        return { chromeFolderId: folderId };
+        return _normalizeFolderEntry(_syncFolders[teamId]);
     }
 
     /**
@@ -524,6 +552,8 @@ const TeamManagement = (() => {
 
     /**
      * Set the Chrome bookmark folder mapping for a team.
+     * Writes the new object shape { chromeFolderId, subscribedFolderIds[] },
+     * preserving any existing subscribedFolderIds.
      * When folderId is null/undefined, the mapping is removed.
      *
      * @param {string} teamId - UUID of the team
@@ -536,13 +566,61 @@ const TeamManagement = (() => {
         }
 
         if (folderId) {
-            _syncFolders[teamId] = folderId;
+            // Preserve existing subscribedFolderIds if present
+            const existing = _normalizeFolderEntry(_syncFolders[teamId]);
+            _syncFolders[teamId] = {
+                chromeFolderId: folderId,
+                subscribedFolderIds: existing ? existing.subscribedFolderIds : []
+            };
         } else {
             delete _syncFolders[teamId];
         }
 
         await _persistCache();
         console.info('[TeamMarks TeamMgmt] Set sync folder for team', teamId, ':', folderId || '(none)');
+    }
+
+    /**
+     * Get the subscribed Supabase folder IDs for a team.
+     * Returns [] when no subscriptions exist (= full-team sync mode).
+     *
+     * @param {string} teamId - UUID of the team
+     * @returns {Promise<string[]>}
+     */
+    async function getSubscribedFolders(teamId) {
+        if (!teamId) return [];
+
+        // Refresh from storage
+        try {
+            const result = await chrome.storage.local.get(STORAGE_KEY_SYNC_FOLDERS);
+            _syncFolders = result[STORAGE_KEY_SYNC_FOLDERS] || {};
+        } catch (_) { /* use cached value */ }
+
+        const entry = _normalizeFolderEntry(_syncFolders[teamId]);
+        return entry ? entry.subscribedFolderIds : [];
+    }
+
+    /**
+     * Set the subscribed Supabase folder IDs for a team.
+     * Persists the new object shape, preserving chromeFolderId.
+     *
+     * @param {string} teamId - UUID of the team
+     * @param {string[]} supabaseIds - Array of subscribed Supabase folder UUIDs
+     * @returns {Promise<void>}
+     */
+    async function setSubscribedFolders(teamId, supabaseIds) {
+        if (!teamId) {
+            throw new Error('[TeamMarks TeamMgmt] Team ID is required.');
+        }
+
+        const existing = _normalizeFolderEntry(_syncFolders[teamId]);
+        _syncFolders[teamId] = {
+            chromeFolderId: existing ? existing.chromeFolderId : null,
+            subscribedFolderIds: Array.isArray(supabaseIds) ? supabaseIds : []
+        };
+
+        await _persistCache();
+        console.info('[TeamMarks TeamMgmt] Set subscribed folders for team', teamId, ':', supabaseIds);
     }
 
     // Return the public API
@@ -557,6 +635,8 @@ const TeamManagement = (() => {
         getTeamMembers,
         getTeamBookmarksFolder,
         setTeamBookmarksFolder,
+        getSubscribedFolders,
+        setSubscribedFolders,
         setCurrentTeam,
         getCurrentTeam
     });
