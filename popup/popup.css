@@ -1,29 +1,36 @@
 /* ============================================================
    TeamMarks — Popup Styles
-   Compact UI for the extension toolbar popup (~350px)
+   Design system: CoinPulse (designmd.ai/chef/coinpulse)
+   Permanent dark mode — 350px compact popup
    ============================================================ */
 
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap');
+
 :root {
-    --color-primary: #4F46E5;
-    --color-primary-hover: #4338CA;
-    --color-primary-light: #EEF2FF;
-    --color-success: #059669;
-    --color-success-light: #ECFDF5;
-    --color-error: #DC2626;
-    --color-error-light: #FEF2F2;
-    --color-warning: #D97706;
-    --color-warning-light: #FFFBEB;
-    --color-bg: #F9FAFB;
-    --color-surface: #FFFFFF;
-    --color-text: #111827;
-    --color-text-secondary: #6B7280;
-    --color-text-muted: #9CA3AF;
-    --color-border: #E5E7EB;
-    --color-border-hover: #D1D5DB;
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+    /* CoinPulse — Dark Mode Tokens */
+    --color-primary: #2563EB;
+    --color-primary-hover: #1D4ED8;
+    --color-primary-light: rgba(37, 99, 235, 0.12);
+    --color-success: #22C55E;
+    --color-success-light: rgba(34, 197, 94, 0.12);
+    --color-error: #EF4444;
+    --color-error-light: rgba(239, 68, 68, 0.12);
+    --color-warning: #F59E0B;
+    --color-warning-light: rgba(245, 158, 11, 0.12);
+    --color-bg: #09090B;
+    --color-surface: #18181B;
+    --color-surface-2: #27272A;
+    --color-text: #FAFAFA;
+    --color-text-secondary: #A1A1AA;
+    --color-text-muted: #71717A;
+    --color-border: #27272A;
+    --color-border-hover: #3F3F46;
+    --shadow-glow: 0 0 0 3px rgba(37, 99, 235, 0.25);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);
     --radius: 6px;
-    --radius-lg: 10px;
-    --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    --radius-lg: 12px;
+    --font-sans: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --font-mono: 'Space Mono', 'Courier New', monospace;
     --transition: 120ms ease;
 }
 
@@ -40,7 +47,8 @@ body {
     width: 350px;
     min-height: 200px;
     font-size: 13px;
-    line-height: 1.4;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
 }
 
 /* ── Header ──────────────────────────────────────────── */
@@ -50,31 +58,38 @@ body {
     align-items: center;
     gap: 10px;
     padding: 14px 16px 12px;
-    background: var(--color-primary);
-    color: white;
+    background: var(--color-surface);
+    color: var(--color-text);
+    border-bottom: 1px solid var(--color-border);
 }
 
 .popup-header__logo {
     width: 28px;
     height: 28px;
     border-radius: 6px;
-    background: rgba(255, 255, 255, 0.2);
+    background: var(--color-primary-light);
+    border: 1px solid rgba(37, 99, 235, 0.35);
     display: flex;
     align-items: center;
     justify-content: center;
+    font-family: var(--font-mono);
     font-weight: 700;
-    font-size: 14px;
+    font-size: 13px;
+    color: var(--color-primary);
     flex-shrink: 0;
 }
 
 .popup-header__title {
-    font-size: 16px;
+    font-family: var(--font-mono);
+    font-size: 14px;
     font-weight: 700;
+    color: var(--color-text);
+    letter-spacing: -0.01em;
 }
 
 .popup-header__subtitle {
     font-size: 11px;
-    opacity: 0.8;
+    color: var(--color-text-muted);
 }
 
 /* ── Content ─────────────────────────────────────────── */
@@ -101,12 +116,14 @@ body {
     height: 32px;
     border-radius: 50%;
     background: var(--color-primary-light);
+    border: 1px solid rgba(37, 99, 235, 0.3);
     color: var(--color-primary);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-weight: 600;
-    font-size: 14px;
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: 13px;
     flex-shrink: 0;
 }
 
@@ -118,6 +135,7 @@ body {
 .auth-bar__name {
     font-weight: 600;
     font-size: 13px;
+    color: var(--color-text);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -125,7 +143,7 @@ body {
 
 .auth-bar__email {
     font-size: 11px;
-    color: var(--color-text-secondary);
+    color: var(--color-text-muted);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -162,34 +180,36 @@ body {
 }
 
 .btn:disabled {
-    opacity: 0.5;
+    opacity: 0.4;
     cursor: not-allowed;
 }
 
 .btn--primary {
     background: var(--color-primary);
-    color: white;
+    color: #fff;
     border-color: var(--color-primary);
 }
 
 .btn--primary:hover:not(:disabled) {
     background: var(--color-primary-hover);
+    box-shadow: 0 0 14px rgba(37, 99, 235, 0.4);
 }
 
 .btn--secondary {
-    background: var(--color-surface);
-    color: var(--color-text);
+    background: var(--color-surface-2);
+    color: var(--color-text-secondary);
     border-color: var(--color-border);
 }
 
 .btn--secondary:hover:not(:disabled) {
-    background: var(--color-bg);
+    background: var(--color-surface);
+    color: var(--color-text);
     border-color: var(--color-border-hover);
 }
 
 .btn--success {
     background: var(--color-success);
-    color: white;
+    color: #fff;
     border-color: var(--color-success);
 }
 
@@ -229,10 +249,11 @@ body {
 }
 
 .status-card__label {
-    font-size: 11px;
-    font-weight: 600;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.08em;
     color: var(--color-text-muted);
     margin-bottom: 6px;
 }
@@ -243,7 +264,7 @@ body {
 }
 
 .status-card__value--success { color: var(--color-success); }
-.status-card__value--error { color: var(--color-error); }
+.status-card__value--error   { color: var(--color-error); }
 .status-card__value--warning { color: var(--color-warning); }
 
 .status-row {
@@ -258,13 +279,18 @@ body {
 }
 
 .status-row__label {
-    font-size: 12px;
-    color: var(--color-text-secondary);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-text-muted);
 }
 
 .status-row__value {
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 500;
+    color: var(--color-text-secondary);
 }
 
 /* ── Connection badge ────────────────────────────────── */
@@ -272,34 +298,48 @@ body {
 .connection-badge {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
+    gap: 5px;
     font-size: 12px;
     font-weight: 500;
 }
 
 .connection-badge__dot {
-    width: 8px;
-    height: 8px;
+    width: 7px;
+    height: 7px;
     border-radius: 50%;
     flex-shrink: 0;
 }
 
+.connection-badge--connected {
+    color: var(--color-success);
+}
+
 .connection-badge--connected .connection-badge__dot {
     background: var(--color-success);
+    box-shadow: 0 0 6px rgba(34, 197, 94, 0.6);
+    animation: pulse-dot 2.5s ease infinite;
+}
+
+.connection-badge--reconnecting {
+    color: var(--color-warning);
 }
 
 .connection-badge--reconnecting .connection-badge__dot {
     background: var(--color-warning);
-    animation: pulse 1.5s ease infinite;
+    animation: pulse-dot 1.2s ease infinite;
+}
+
+.connection-badge--offline {
+    color: var(--color-error);
 }
 
 .connection-badge--offline .connection-badge__dot {
     background: var(--color-error);
 }
 
-@keyframes pulse {
+@keyframes pulse-dot {
     0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
+    50%       { opacity: 0.35; }
 }
 
 /* ── Team switcher ──────────────────────────────────── */
@@ -309,10 +349,11 @@ body {
 }
 
 .team-switcher__label {
-    font-size: 11px;
-    font-weight: 600;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.08em;
     color: var(--color-text-muted);
     margin-bottom: 6px;
 }
@@ -329,16 +370,17 @@ body {
     cursor: pointer;
     outline: none;
     appearance: none;
-    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%236B7280'%3E%3Cpath d='M4.5 6l3.5 4 3.5-4z'/%3E%3C/svg%3E");
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%2371717A'%3E%3Cpath d='M4.5 6l3.5 4 3.5-4z'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
     background-position: right 8px center;
     background-size: 16px;
     padding-right: 28px;
+    transition: border-color var(--transition), box-shadow var(--transition);
 }
 
 .team-switcher__select:focus {
     border-color: var(--color-primary);
-    box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+    box-shadow: var(--shadow-glow);
 }
 
 /* ── Quick actions ───────────────────────────────────── */
@@ -357,7 +399,7 @@ body {
 .error-banner {
     padding: 8px 12px;
     background: var(--color-error-light);
-    border: 1px solid var(--color-error);
+    border: 1px solid rgba(239, 68, 68, 0.3);
     border-radius: var(--radius);
     color: var(--color-error);
     font-size: 12px;
@@ -369,7 +411,7 @@ body {
 .empty-state {
     text-align: center;
     padding: 20px 12px;
-    color: var(--color-text-secondary);
+    color: var(--color-text-muted);
     font-size: 13px;
 }
 
@@ -379,6 +421,6 @@ body {
     justify-content: center;
     gap: 8px;
     padding: 20px;
-    color: var(--color-text-secondary);
+    color: var(--color-text-muted);
     font-size: 13px;
 }
