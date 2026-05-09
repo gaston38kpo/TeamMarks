@@ -854,6 +854,7 @@
     // Wizard button handlers
     document.getElementById('btn-wizard-skip')?.addEventListener('click', completeOnboarding);
     document.getElementById('btn-wizard-done')?.addEventListener('click', completeOnboarding);
+    document.getElementById('btn-wizard-dismiss')?.addEventListener('click', completeOnboarding);
 
     // ================================================================
     // Initialization
