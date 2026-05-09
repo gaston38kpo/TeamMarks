@@ -249,7 +249,8 @@
             await sendMessage('resolveJoinConflict', {
                 teamId: p.teamId,
                 resolution,
-                existingFolderId: p.existingFolderId
+                existingFolderId: p.existingFolderId,
+                teamName: p.teamName
             });
             state.pendingConflict = null;
             await refreshTeamsAndStatus();

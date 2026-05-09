@@ -291,6 +291,11 @@ async function handleMessage(message, sender) {
             return { success: true };
         }
 
+        case 'getTeamMembers': {
+            const members = await TeamManagement.getTeamMembers(message.teamId);
+            return { success: true, data: members };
+        }
+
         case 'resolveJoinConflict': {
             const { teamId, resolution, existingFolderId, teamName } = message;
             if (!teamId || !resolution || !existingFolderId) {
