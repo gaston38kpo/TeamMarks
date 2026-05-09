@@ -497,6 +497,12 @@ async function handleMessage(message, sender) {
 chrome.runtime.onInstalled.addListener((details) => {
     console.info('[TeamMarks] Extension installed/updated:', details.reason);
 
+    // On fresh install: set the first-run flag so the settings wizard shows
+    if (details.reason === 'install') {
+        chrome.storage.local.set({ teammarks_firstRun: true });
+        console.info('[TeamMarks] First-run flag set.');
+    }
+
     // Register the catch-up alarm immediately on install
     try {
         chrome.alarms.create('teammarks-catchup', { periodInMinutes: 5 });
