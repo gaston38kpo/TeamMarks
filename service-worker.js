@@ -9,22 +9,19 @@
  * Module load order matters — config and lib first, then features.
  *
  * MESSAGE HANDLERS (chrome.runtime.onMessage):
- *   signIn         → Auth.signIn()
- *   signOut        → Auth.signOut()
- *   getSession     → Auth.getSession()
- *   getTeams       → TeamManagement.getMyTeams()
- *   createTeam     → TeamManagement.createTeam(orgId, name)
- *   joinTeam       → TeamManagement.joinTeam(inviteCode)
- *   leaveTeam      → TeamManagement.leaveTeam(teamId)
- *   selectTeam     → SyncEngine.startSync(teamId)
- *   setSyncFolder  → TeamManagement.setTeamBookmarksFolder(teamId, folderId) + SyncEngine.startSync
- *   getBookmarkTree → chrome.bookmarks.getTree()
- *   syncStatus     → SyncEngine.getStatus()
- *   manualSync     → SyncEngine.fullSync()
- *   getTeamFolderTree → Query Supabase for team's folder list [{id, title, parent_id}]
- *   getSubscribedFolderIds → TeamManagement.getSubscribedFolders(teamId)
- *   subscribeFolder → Add supabaseFolderId to subscriptions, rebuild, fullSync
- *   unsubscribeFolder → Remove supabaseFolderId, remove Chrome subtree, clean idMap
+ *   signIn              → Auth.signIn()
+ *   signOut             → Auth.signOut() + SyncEngine.stopAllSync()
+ *   getSession          → Auth.getSession()
+ *   getTeams            → TeamManagement.getMyTeams()
+ *   createTeam          → TeamManagement.createTeam(orgId, name)
+ *   joinTeam            → TeamManagement.joinTeam(inviteCode)
+ *   leaveTeam           → TeamManagement.leaveTeam(teamId)
+ *   syncStatus          → SyncEngine.getStatus()
+ *   manualSync          → SyncEngine.fullSync(teamId) for all active teams
+ *   resolveJoinConflict → TeamManagement.resolveJoinConflict(teamId, resolution, existingFolderId, teamName)
+ *
+ * REMOVED HANDLERS: selectTeam, setSyncFolder, getBookmarkTree,
+ *   getTeamFolderTree, getSubscribedFolderIds, subscribeFolder, unsubscribeFolder
  */
 
 importScripts(
@@ -68,6 +65,44 @@ async function initTeamMarks() {
         console.error('[TeamMarks] Auth init failed:', err);
     }
 
+    // 1b. Migrate legacy storage keys — run before TeamManagement.init()
+    //     Removed keys: teammarks_firstRun, teammarks_onboarded, teammarks_currentTeamId
+    //     teammarks_lastSyncTimestamp → teammarks_lastSyncTimestamps (per-team Map)
+    try {
+        const legacyResult = await chrome.storage.local.get([
+            'teammarks_lastSyncTimestamp',
+            'teammarks_currentTeamId',
+            'teammarks_firstRun',
+            'teammarks_onboarded'
+        ]);
+
+        const keysToRemove = [
+            'teammarks_firstRun',
+            'teammarks_onboarded',
+            'teammarks_currentTeamId'
+        ];
+
+        // Migrate scalar timestamp → per-team Map
+        if (legacyResult['teammarks_lastSyncTimestamp']) {
+            const legacyTs = legacyResult['teammarks_lastSyncTimestamp'];
+            const currentTeamId = legacyResult['teammarks_currentTeamId'] || null;
+            if (currentTeamId) {
+                const existing = await chrome.storage.local.get('teammarks_lastSyncTimestamps');
+                const tsMap = existing['teammarks_lastSyncTimestamps'] || {};
+                if (!tsMap[currentTeamId]) {
+                    tsMap[currentTeamId] = legacyTs;
+                    await chrome.storage.local.set({ teammarks_lastSyncTimestamps: tsMap });
+                }
+            }
+            keysToRemove.push('teammarks_lastSyncTimestamp');
+        }
+
+        await chrome.storage.local.remove(keysToRemove);
+        console.info('[TeamMarks] Storage migration complete. Removed stale keys.');
+    } catch (err) {
+        console.warn('[TeamMarks] Storage migration failed (non-fatal):', err);
+    }
+
     // 2. Initialize team management cache from storage
     try {
         await TeamManagement.init();
@@ -89,17 +124,15 @@ async function initTeamMarks() {
         console.error('[TeamMarks] Sync engine init failed:', err);
     }
 
-    // 4. If authenticated and have a current team, start sync
+    // 4. If authenticated, start sync for all known teams
     if (session) {
-        const currentTeam = TeamManagement.getCurrentTeam();
-        if (currentTeam) {
+        const teams = TeamManagement.getMyTeams();
+        for (const team of teams) {
             try {
-                const folderInfo = await TeamManagement.getTeamBookmarksFolder(currentTeam.id);
-                const folderId = folderInfo ? folderInfo.chromeFolderId : undefined;
-                await SyncEngine.startSync(currentTeam.id, folderId);
-                console.info('[TeamMarks] Auto-resumed sync for team:', currentTeam.name);
+                await SyncEngine.startSync(team.id);
+                console.info('[TeamMarks] Auto-resumed sync for team:', team.name);
             } catch (err) {
-                console.error('[TeamMarks] Auto-resume sync failed:', err);
+                console.error('[TeamMarks] Auto-resume sync failed for team', team.id, ':', err);
             }
         }
     }
@@ -131,39 +164,20 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
     console.info('[TeamMarks] Catch-up alarm fired.');
 
-    const status = SyncEngine.getStatus();
-
-    // If not syncing, nothing to do
-    if (!status.teamId) {
-        console.debug('[TeamMarks] Not syncing — skipping catch-up.');
+    const teams = TeamManagement.getMyTeams();
+    if (teams.length === 0) {
+        console.debug('[TeamMarks] No teams — skipping catch-up.');
         return;
     }
 
-    // If disconnected, try to reconnect
-    if (!status.connected) {
-        console.info('[TeamMarks] Realtime disconnected — reconnecting…');
+    // Sync each team independently; one failure must not block others
+    for (const team of teams) {
         try {
-            const session = await Auth.ensureValidSession();
-            if (session) {
-                const folderInfo = await TeamManagement.getTeamBookmarksFolder(status.teamId);
-                const folderId = folderInfo ? folderInfo.chromeFolderId : undefined;
-                await SyncEngine.startSync(status.teamId, folderId);
-                console.info('[TeamMarks] Reconnected successfully.');
-            } else {
-                console.warn('[TeamMarks] Cannot reconnect — no valid session.');
-            }
+            await SyncEngine.fullSync(team.id);
+            console.info('[TeamMarks] Catch-up sync completed for team:', team.name);
         } catch (err) {
-            console.error('[TeamMarks] Reconnect failed:', err);
+            console.error('[TeamMarks] Catch-up sync failed for team', team.id, ':', err);
         }
-        return;
-    }
-
-    // Connected — run a catch-up sync
-    try {
-        await SyncEngine.fullSync();
-        console.info('[TeamMarks] Catch-up sync completed.');
-    } catch (err) {
-        console.error('[TeamMarks] Catch-up sync failed:', err);
     }
 });
 
@@ -187,23 +201,20 @@ Auth.onSessionChange(async (session) => {
             console.error('[TeamMarks] Failed to refresh teams on auth:', err);
         }
 
-        // Auto-select last team and start sync
-        const currentTeam = TeamManagement.getCurrentTeam();
-        if (currentTeam) {
+        // Start sync for all teams
+        const teams = TeamManagement.getMyTeams();
+        for (const team of teams) {
             try {
-                const folderInfo = await TeamManagement.getTeamBookmarksFolder(currentTeam.id);
-                const folderId = folderInfo ? folderInfo.chromeFolderId : undefined;
-                await SyncEngine.startSync(currentTeam.id, folderId);
-                console.info('[TeamMarks] Sync started for team:', currentTeam.name);
+                await SyncEngine.startSync(team.id);
+                console.info('[TeamMarks] Sync started for team:', team.name);
             } catch (err) {
-                console.error('[TeamMarks] Failed to start sync after sign-in:', err);
+                console.error('[TeamMarks] Failed to start sync for team', team.id, ':', err);
             }
         }
     } else {
         console.info('[TeamMarks] Auth state: signed out.');
-        // Stop sync and clean up
         try {
-            await SyncEngine.stopSync();
+            await SyncEngine.stopAllSync();
         } catch (err) {
             console.error('[TeamMarks] Failed to stop sync after sign-out:', err);
         }
@@ -254,7 +265,7 @@ async function handleMessage(message, sender) {
 
         case 'signOut': {
             await Auth.signOut();
-            await SyncEngine.stopSync();
+            await SyncEngine.stopAllSync();
             return { success: true };
         }
 
@@ -265,37 +276,33 @@ async function handleMessage(message, sender) {
         }
 
         case 'createTeam': {
-            const team = await TeamManagement.createTeam(message.orgId, message.name);
-            return { success: true, data: team };
+            const result = await TeamManagement.createTeam(message.orgId, message.name);
+            return { success: true, data: result };
         }
 
         case 'joinTeam': {
-            const team = await TeamManagement.joinTeam(message.inviteCode);
-            return { success: true, data: team };
+            const result = await TeamManagement.joinTeam(message.inviteCode);
+            return { success: true, data: result };
         }
 
         case 'leaveTeam': {
             await TeamManagement.leaveTeam(message.teamId);
+            await SyncEngine.stopSync(message.teamId);
             return { success: true };
         }
 
-        case 'selectTeam': {
-            const { teamId } = message;
-            if (!teamId) {
-                return { success: false, error: 'teamId is required.' };
+        case 'getTeamMembers': {
+            const members = await TeamManagement.getTeamMembers(message.teamId);
+            return { success: true, data: members };
+        }
+
+        case 'resolveJoinConflict': {
+            const { teamId, resolution, existingFolderId, teamName } = message;
+            if (!teamId || !resolution || !existingFolderId) {
+                return { success: false, error: 'teamId, resolution, and existingFolderId are required.' };
             }
-
-            // Set current team
-            await TeamManagement.setCurrentTeam(teamId);
-
-            // Get the sync folder mapping
-            const folderInfo = await TeamManagement.getTeamBookmarksFolder(teamId);
-            const folderId = folderInfo ? folderInfo.chromeFolderId : undefined;
-
-            // Start syncing
-            await SyncEngine.startSync(teamId, folderId);
-
-            return { success: true, data: { teamId, folderId } };
+            const result = await TeamManagement.resolveJoinConflict(teamId, resolution, existingFolderId, teamName);
+            return { success: true, data: result };
         }
 
         // ── Sync ──────────────────────────────────────────
@@ -305,179 +312,24 @@ async function handleMessage(message, sender) {
         }
 
         case 'manualSync': {
-            await SyncEngine.fullSync();
+            // Sync all active teams, collecting errors per team
+            const teams = TeamManagement.getMyTeams();
+            const errors = [];
+            for (const team of teams) {
+                try {
+                    await SyncEngine.fullSync(team.id);
+                } catch (err) {
+                    errors.push({ teamId: team.id, error: err.message });
+                }
+            }
             const status = SyncEngine.getStatus();
-            return { success: true, data: status };
+            return { success: errors.length === 0, data: status, errors: errors.length > 0 ? errors : undefined };
         }
 
         // ── Session ────────────────────────────────────────
         case 'getSession': {
             const session = Auth.getSession();
             return { success: true, data: session };
-        }
-
-        // ── Bookmarks ──────────────────────────────────────
-        case 'getBookmarkTree': {
-            const tree = await chrome.bookmarks.getTree();
-            return { success: true, data: tree };
-        }
-
-        case 'setSyncFolder': {
-            const { teamId: tid, folderId: fid } = message;
-            if (!tid) {
-                return { success: false, error: 'teamId is required.' };
-            }
-            await TeamManagement.setTeamBookmarksFolder(tid, fid || null);
-            // Restart sync with the new folder (or stop if cleared)
-            if (fid) {
-                const folderInfo = await TeamManagement.getTeamBookmarksFolder(tid);
-                await SyncEngine.startSync(tid, folderInfo ? folderInfo.chromeFolderId : undefined);
-            } else {
-                await SyncEngine.stopSync();
-            }
-            return { success: true, data: { teamId: tid, folderId: fid || null } };
-        }
-
-        // ── Folder Subscriptions ───────────────────────────
-
-        case 'getTeamFolderTree': {
-            // Returns flat array of Supabase folder records for the current team
-            const status = SyncEngine.getStatus();
-            const teamId = message.teamId || status.teamId;
-            if (!teamId) {
-                return { success: false, error: 'No active team.' };
-            }
-
-            const supabase = createSupabaseClient();
-            if (!supabase) {
-                return { success: false, error: 'Supabase client not available.' };
-            }
-
-            const { data, error } = await supabase
-                .from('bookmarks')
-                .select('id, title, parent_id')
-                .eq('team_id', teamId)
-                .eq('is_folder', true)
-                .is('deleted_at', null)
-                .order('title', { ascending: true });
-
-            if (error) {
-                console.error('[TeamMarks] getTeamFolderTree failed:', error);
-                return { success: false, error: error.message };
-            }
-
-            return { success: true, data: data || [] };
-        }
-
-        case 'getSubscribedFolderIds': {
-            const status = SyncEngine.getStatus();
-            const teamId = message.teamId || status.teamId;
-            if (!teamId) {
-                return { success: false, error: 'No active team.' };
-            }
-            const ids = await TeamManagement.getSubscribedFolders(teamId);
-            return { success: true, data: ids };
-        }
-
-        case 'subscribeFolder': {
-            const status = SyncEngine.getStatus();
-            const teamId = message.teamId || status.teamId;
-            const { supabaseFolderId } = message;
-            if (!teamId || !supabaseFolderId) {
-                return { success: false, error: 'teamId and supabaseFolderId are required.' };
-            }
-
-            // Add to subscriptions
-            const current = await TeamManagement.getSubscribedFolders(teamId);
-            if (!current.includes(supabaseFolderId)) {
-                await TeamManagement.setSubscribedFolders(teamId, [...current, supabaseFolderId]);
-            }
-
-            // Ensure the Chrome folder exists under the team root before syncing
-            const existingChromeId = SyncEngine.getChromeId(supabaseFolderId);
-            if (!existingChromeId) {
-                // Fetch the folder title from Supabase so we can create it in Chrome
-                const supabase = createSupabaseClient();
-                if (supabase) {
-                    const { data: folderRecord, error: fetchErr } = await supabase
-                        .from('bookmarks')
-                        .select('title')
-                        .eq('id', supabaseFolderId)
-                        .single();
-
-                    if (fetchErr) {
-                        console.warn('[TeamMarks] subscribeFolder: could not fetch folder record:', fetchErr);
-                    } else if (folderRecord) {
-                        const syncStatus = SyncEngine.getStatus();
-                        // teamRootFolderId is not directly exposed; get it via the folder mapping
-                        const folderInfo = await TeamManagement.getTeamBookmarksFolder(teamId);
-                        const teamRootId = folderInfo ? folderInfo.chromeFolderId : null;
-                        if (teamRootId) {
-                            try {
-                                const newFolder = await chrome.bookmarks.create({
-                                    parentId: teamRootId,
-                                    title: folderRecord.title || ''
-                                });
-                                await SyncEngine.addIdMapping(newFolder.id, supabaseFolderId);
-                                console.info('[TeamMarks] subscribeFolder: created Chrome folder', newFolder.id, 'for', supabaseFolderId);
-                            } catch (createErr) {
-                                console.warn('[TeamMarks] subscribeFolder: could not create Chrome folder:', createErr);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Enqueue a fullSync so the subscribed subtree is pulled down
-            SyncEngine.enqueueSyncOp(() => SyncEngine.fullSync());
-
-            return { success: true };
-        }
-
-        case 'unsubscribeFolder': {
-            const status = SyncEngine.getStatus();
-            const teamId = message.teamId || status.teamId;
-            const { supabaseFolderId } = message;
-            if (!teamId || !supabaseFolderId) {
-                return { success: false, error: 'teamId and supabaseFolderId are required.' };
-            }
-
-            // Enqueue the entire unsubscribe operation to avoid races
-            SyncEngine.enqueueSyncOp(async () => {
-                // 1. Remove from subscriptions
-                const ids = await TeamManagement.getSubscribedFolders(teamId);
-                await TeamManagement.setSubscribedFolders(teamId, ids.filter(id => id !== supabaseFolderId));
-
-                // 2. Find Chrome folder via idMap and remove subtree
-                const chromeId = SyncEngine.getChromeId(supabaseFolderId);
-                if (chromeId) {
-                    // Collect all descendant Chrome IDs before removal
-                    const allChromeIds = [];
-                    try {
-                        const subTree = await chrome.bookmarks.getSubTree(chromeId);
-                        if (subTree && subTree.length > 0) {
-                            collectChromeIds(subTree[0], allChromeIds);
-                        }
-                    } catch (err) {
-                        console.warn('[TeamMarks] getSubTree failed during unsubscribe:', err);
-                        allChromeIds.push(chromeId);
-                    }
-
-                    // Remove the Chrome subtree
-                    try {
-                        await chrome.bookmarks.removeTree(chromeId);
-                    } catch (err) {
-                        console.warn('[TeamMarks] removeTree failed during unsubscribe (continuing cleanup):', err);
-                    }
-
-                    // Clear all idMap entries
-                    for (const cid of allChromeIds) {
-                        await SyncEngine.removeIdMappingByChromeId(cid);
-                    }
-                }
-            });
-
-            return { success: true };
         }
 
         default:
@@ -497,6 +349,11 @@ async function handleMessage(message, sender) {
 chrome.runtime.onInstalled.addListener((details) => {
     console.info('[TeamMarks] Extension installed/updated:', details.reason);
 
+    // On fresh install — no first-run flag needed (wizard removed in simplified flow)
+    if (details.reason === 'install') {
+        console.info('[TeamMarks] Fresh install detected.');
+    }
+
     // Register the catch-up alarm immediately on install
     try {
         chrome.alarms.create('teammarks-catchup', { periodInMinutes: 5 });
@@ -509,21 +366,5 @@ chrome.runtime.onInstalled.addListener((details) => {
 // ==============================================================
 // Initialize
 // ==============================================================
-
-/**
- * Recursively collect all Chrome bookmark IDs from a subtree node.
- * Used by the unsubscribeFolder handler to clean up idMap entries.
- *
- * @param {object} node - Chrome bookmark tree node
- * @param {string[]} result - Accumulator array
- */
-function collectChromeIds(node, result) {
-    result.push(node.id);
-    if (node.children) {
-        for (const child of node.children) {
-            collectChromeIds(child, result);
-        }
-    }
-}
 
 initTeamMarks();

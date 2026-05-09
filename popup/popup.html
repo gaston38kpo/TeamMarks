@@ -1,24 +1,231 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="es">
 <head>
     <meta charset="UTF-8">
     <link rel="stylesheet" href="popup.css">
     <title>TeamMarks</title>
+    <style>
+        /* ── Team list ───────────────────────────────────────── */
+        .team-list {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-bottom: 10px;
+        }
+
+        .team-card {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: var(--color-surface);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius);
+            padding: 10px 12px;
+        }
+
+        .team-card__dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            background: var(--color-error);
+        }
+
+        .team-card__dot--connected {
+            background: var(--color-success);
+            box-shadow: 0 0 6px rgba(34, 197, 94, 0.6);
+            animation: pulse-dot 2.5s ease infinite;
+        }
+
+        .team-card__dot--reconnecting {
+            background: var(--color-warning);
+            animation: pulse-dot 1.2s ease infinite;
+        }
+
+        .team-card__info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .team-card__name {
+            font-weight: 600;
+            font-size: 13px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .team-card__meta {
+            font-size: 11px;
+            color: var(--color-text-muted);
+            margin-top: 1px;
+        }
+
+        .team-card__leave {
+            flex-shrink: 0;
+            background: transparent;
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius);
+            color: var(--color-text-muted);
+            font-size: 11px;
+            padding: 3px 8px;
+            cursor: pointer;
+            transition: all var(--transition);
+        }
+
+        .team-card__leave:hover {
+            border-color: var(--color-error);
+            color: var(--color-error);
+        }
+
+        /* ── Inline forms ────────────────────────────────────── */
+        .inline-form {
+            display: none;
+            background: var(--color-surface);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius);
+            padding: 10px 12px;
+            margin-bottom: 10px;
+        }
+
+        .inline-form.is-visible {
+            display: block;
+        }
+
+        .inline-form__row {
+            display: flex;
+            gap: 6px;
+        }
+
+        .inline-form__input {
+            flex: 1;
+            padding: 6px 10px;
+            font-size: 13px;
+            font-family: var(--font-sans);
+            background: var(--color-surface-2);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius);
+            color: var(--color-text);
+            outline: none;
+            transition: border-color var(--transition), box-shadow var(--transition);
+        }
+
+        .inline-form__input:focus {
+            border-color: var(--color-primary);
+            box-shadow: var(--shadow-glow);
+        }
+
+        /* ── No-teams state ──────────────────────────────────── */
+        .no-teams-actions {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+
+        /* ── Conflict resolution ─────────────────────────────── */
+        .conflict-box {
+            background: var(--color-surface);
+            border: 1px solid rgba(245, 158, 11, 0.4);
+            border-radius: var(--radius);
+            padding: 12px;
+            margin-bottom: 10px;
+        }
+
+        .conflict-box__title {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--color-warning);
+            margin-bottom: 8px;
+        }
+
+        .conflict-box__label {
+            font-size: 12px;
+            color: var(--color-text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .radio-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-bottom: 10px;
+        }
+
+        .radio-option {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+
+        .radio-option input[type="radio"] {
+            accent-color: var(--color-primary);
+        }
+
+        /* ── Add team area ───────────────────────────────────── */
+        .add-team-row {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 8px;
+        }
+
+        .add-team-row .btn {
+            flex: 1;
+        }
+
+        /* ── Bottom actions ──────────────────────────────────── */
+        .bottom-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        .bottom-actions .btn {
+            flex: 1;
+        }
+    </style>
 </head>
 <body>
     <!-- Header -->
     <header class="popup-header">
         <div class="popup-header__logo">T</div>
-        <div>
+        <div style="flex:1;">
             <div class="popup-header__title">TeamMarks</div>
             <div class="popup-header__subtitle">Bookmark sync for teams</div>
         </div>
+        <button id="btn-settings" class="btn-icon" title="Settings" style="margin-left:auto;">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+        </button>
     </header>
 
     <!-- Content -->
     <div class="popup-content">
-        <!-- Auth status (shown when signed in) -->
+
+        <!-- Loading state -->
+        <div id="popup-loading" class="loading-state">
+            <span class="spinner"></span> Cargando…
+        </div>
+
+        <!-- Signed out state -->
+        <div id="auth-signed-out" style="display:none;">
+            <div class="auth-bar__signed-out">
+                <p>Iniciá sesión para sincronizar marcadores con tu equipo</p>
+                <button id="btn-sign-in" class="btn btn--primary btn--full">Iniciar sesión con Google</button>
+            </div>
+        </div>
+
+        <!-- Signed in state -->
         <div id="auth-signed-in" style="display:none;">
+
+            <!-- User info -->
             <div class="auth-bar">
                 <div id="user-avatar" class="auth-bar__avatar">?</div>
                 <div class="auth-bar__info">
@@ -27,67 +234,95 @@
                 </div>
             </div>
 
-            <!-- Team switcher -->
-            <div id="team-switcher" class="team-switcher" style="display:none;">
-                <div class="team-switcher__label">Active Team</div>
-                <select id="team-select" class="team-switcher__select">
-                    <option value="">Select a team…</option>
-                </select>
-            </div>
-
-            <!-- Sync status -->
-            <div id="sync-status" class="status-card">
-                <div class="status-row">
-                    <span class="status-row__label">Connection</span>
-                    <span id="connection-status" class="status-row__value">
-                        <span class="connection-badge connection-badge--offline">
-                            <span class="connection-badge__dot"></span>
-                            Offline
-                        </span>
-                    </span>
-                </div>
-                <div class="status-row">
-                    <span class="status-row__label">Last synced</span>
-                    <span id="last-sync" class="status-row__value">Never</span>
-                </div>
-                <div class="status-row">
-                    <span class="status-row__label">Sync folder</span>
-                    <span class="status-row__right">
-                        <span id="sync-folder" class="status-row__value">Not set</span>
-                        <button id="btn-refresh-folder" class="btn-icon" title="Refresh sync folder">
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                                <path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
-                                <path d="M21 3v5h-5"/>
-                                <path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
-                                <path d="M3 21v-5h5"/>
-                            </svg>
-                        </button>
-                    </span>
-                </div>
-            </div>
-
-            <!-- Error display -->
+            <!-- Error banner -->
             <div id="error-display" class="error-banner" style="display:none;"></div>
 
-            <!-- Quick actions -->
-            <div class="quick-actions">
-                <button id="btn-sync-now" class="btn btn--primary">Sync Now</button>
-                <button id="btn-settings" class="btn btn--secondary">Settings</button>
-            </div>
-        </div>
+            <!-- Conflict resolution UI (hidden by default) -->
+            <div id="conflict-box" class="conflict-box" style="display:none;">
+                <div class="conflict-box__title">⚠ Carpeta existente detectada</div>
+                <div id="conflict-team-name" class="conflict-box__label"></div>
 
-        <!-- Signed out state -->
-        <div id="auth-signed-out">
-            <div class="auth-bar__signed-out">
-                <p>Sign in to sync bookmarks with your team</p>
-                <button id="btn-sign-in" class="btn btn--primary btn--full">Sign in with Google</button>
-            </div>
-        </div>
+                <!-- Step 1 -->
+                <div id="conflict-step-1">
+                    <div class="radio-group">
+                        <label class="radio-option">
+                            <input type="radio" name="conflict-choice" value="keep" checked>
+                            Conservar carpeta existente (se renombrará como backup)
+                        </label>
+                        <label class="radio-option">
+                            <input type="radio" name="conflict-choice" value="replace">
+                            Reemplazar (elegir qué datos conservar)
+                        </label>
+                    </div>
+                </div>
 
-        <!-- Loading state -->
-        <div id="popup-loading" class="loading-state" style="display:none;">
-            <span class="spinner"></span> Loading…
-        </div>
+                <!-- Step 2 (shown when "Reemplazar" selected) -->
+                <div id="conflict-step-2" style="display:none;">
+                    <div class="radio-group">
+                        <label class="radio-option">
+                            <input type="radio" name="conflict-replace" value="replace-local" checked>
+                            Conservar local (sobrescribir remoto)
+                        </label>
+                        <label class="radio-option">
+                            <input type="radio" name="conflict-replace" value="replace-remote">
+                            Conservar remoto (eliminar contenido local)
+                        </label>
+                        <label class="radio-option">
+                            <input type="radio" name="conflict-replace" value="combine">
+                            Combinar ambos (unión, último ganador)
+                        </label>
+                    </div>
+                </div>
+
+                <button id="btn-confirm-conflict" class="btn btn--primary btn--full">Confirmar</button>
+            </div>
+
+            <!-- No-teams state -->
+            <div id="no-teams-state" style="display:none;">
+                <div class="empty-state" style="padding:16px 0 12px;">
+                    <div style="font-size:20px; margin-bottom:6px;">👥</div>
+                    <div>No pertenecés a ningún team aún</div>
+                </div>
+                <div class="no-teams-actions">
+                    <button id="btn-create-team" class="btn btn--primary btn--full">Crear team</button>
+                    <button id="btn-join-team" class="btn btn--secondary btn--full">Unirse a team</button>
+                </div>
+            </div>
+
+            <!-- Has-teams state -->
+            <div id="has-teams-state" style="display:none;">
+                <ul id="team-list" class="team-list"></ul>
+
+                <div class="add-team-row">
+                    <button id="btn-add-team-create" class="btn btn--secondary btn--small">+ Crear team</button>
+                    <button id="btn-add-team-join" class="btn btn--secondary btn--small">+ Unirse a team</button>
+                </div>
+            </div>
+
+            <!-- Create team inline form -->
+            <div id="form-create" class="inline-form">
+                <div class="inline-form__row">
+                    <input id="input-team-name" class="inline-form__input" type="text" placeholder="Nombre del team" maxlength="60">
+                    <button id="btn-create-submit" class="btn btn--primary btn--small">Crear</button>
+                </div>
+            </div>
+
+            <!-- Join team inline form -->
+            <div id="form-join" class="inline-form">
+                <div class="inline-form__row">
+                    <input id="input-invite-code" class="inline-form__input" type="text" placeholder="Código de invitación" maxlength="10">
+                    <button id="btn-join-submit" class="btn btn--secondary btn--small">Unirse</button>
+                </div>
+            </div>
+
+            <!-- Bottom actions (Sync Now + last-sync info, shown when has teams) -->
+            <div id="sync-row" style="display:none;">
+                <div class="bottom-actions">
+                    <button id="btn-sync-now" class="btn btn--primary">Sync Now</button>
+                </div>
+            </div>
+
+        </div><!-- /auth-signed-in -->
     </div>
 
     <script src="popup.js"></script>

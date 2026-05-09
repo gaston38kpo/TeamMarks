@@ -9,18 +9,19 @@
  * EXPORTS (global scope for importScripts):
  *   TeamManagement.init()                        → Restore cache from storage
  *   TeamManagement.generateInviteCode()           → Generate random 6-char code
- *   TeamManagement.createTeam(orgId, name)        → Create team, add creator as admin
- *   TeamManagement.joinTeam(inviteCode)            → Join team by invite code
+ *   TeamManagement.createTeam(orgId, name)        → Create team, auto-create folder, start sync
+ *   TeamManagement.joinTeam(inviteCode)            → Join team; returns needsConflictResolution flag
  *   TeamManagement.leaveTeam(teamId)               → Leave a team
  *   TeamManagement.getMyTeams()                     → Returns cached team list (sync)
  *   TeamManagement.refreshTeams()                   → Fetch teams from Supabase
  *   TeamManagement.getTeamMembers(teamId)          → List team members
- *   TeamManagement.getTeamBookmarksFolder(teamId)  → Get local Chrome folder mapping (normalized)
- *   TeamManagement.setTeamBookmarksFolder(teamId, folderId) → Set Chrome folder (new shape)
- *   TeamManagement.getSubscribedFolders(teamId)    → Get subscribed Supabase folder IDs
- *   TeamManagement.setSubscribedFolders(teamId, ids[]) → Set subscribed Supabase folder IDs
- *   TeamManagement.setCurrentTeam(teamId)           → Switch active team
- *   TeamManagement.getCurrentTeam()                 → Returns active team (sync)
+ *   TeamManagement.getTeamBookmarksFolder(teamId)  → Get local Chrome folder mapping
+ *   TeamManagement.setTeamBookmarksFolder(teamId, folderId) → Set Chrome folder
+ *   TeamManagement.resolveJoinConflict(teamId, resolution, existingFolderId, teamName)
+ *                                                  → Resolve folder conflict after joinTeam
+ *
+ * REMOVED (subscription model replaced by auto-folder management):
+ *   getSubscribedFolders, setSubscribedFolders, setCurrentTeam, getCurrentTeam
  *
  * DEPENDENCIES (load via importScripts before this file):
  *   - lib/config.js   (SUPABASE_CONFIG)
@@ -35,7 +36,6 @@ const TeamManagement = (() => {
     // ---------------------------------------------------------------
 
     const STORAGE_KEY_TEAMS = 'teammarks_teams';
-    const STORAGE_KEY_CURRENT_TEAM = 'teammarks_currentTeamId';
     const STORAGE_KEY_SYNC_FOLDERS = 'teammarks_syncFolders';
 
     // ---------------------------------------------------------------
@@ -45,11 +45,8 @@ const TeamManagement = (() => {
     /** @type {object[]} Cached list of teams the user belongs to */
     let _teams = [];
 
-    /** @type {string|null} UUID of the currently selected team */
-    let _currentTeamId = null;
-
     /**
-     * @type {object} Map of teamId → { chromeFolderId, subscribedFolderIds[] } from storage.
+     * @type {object} Map of teamId → { chromeFolderId } from storage.
      * Legacy values may still be plain strings (chromeFolderId only).
      */
     let _syncFolders = {};
@@ -94,13 +91,13 @@ const TeamManagement = (() => {
     }
 
     /**
-     * Save the teams list and current team to chrome.storage.local.
+     * Save the teams list and sync folders to chrome.storage.local.
+     * Note: teammarks_currentTeamId is no longer persisted (multi-team model).
      * @returns {Promise<void>}
      */
     async function _persistCache() {
         await chrome.storage.local.set({
             [STORAGE_KEY_TEAMS]: _teams,
-            [STORAGE_KEY_CURRENT_TEAM]: _currentTeamId,
             [STORAGE_KEY_SYNC_FOLDERS]: _syncFolders
         });
     }
@@ -119,19 +116,16 @@ const TeamManagement = (() => {
         try {
             const result = await chrome.storage.local.get([
                 STORAGE_KEY_TEAMS,
-                STORAGE_KEY_CURRENT_TEAM,
                 STORAGE_KEY_SYNC_FOLDERS
             ]);
 
             _teams = result[STORAGE_KEY_TEAMS] || [];
-            _currentTeamId = result[STORAGE_KEY_CURRENT_TEAM] || null;
             _syncFolders = result[STORAGE_KEY_SYNC_FOLDERS] || {};
 
             console.info('[TeamMarks TeamMgmt] Restored', _teams.length, 'teams from cache.');
         } catch (err) {
             console.error('[TeamMarks TeamMgmt] Failed to restore cache:', err);
             _teams = [];
-            _currentTeamId = null;
             _syncFolders = {};
         }
     }
@@ -154,8 +148,66 @@ const TeamManagement = (() => {
     }
 
     /**
+     * Ensure the [TeamMarks] parent folder exists at the Bookmarks Bar level.
+     * Searches before creating to avoid duplicates (race-safe: search-first wins).
+     *
+     * @returns {Promise<string>} Chrome folder ID of the [TeamMarks] folder
+     */
+    async function _ensureParentFolder() {
+        const PARENT_TITLE = '[TeamMarks]';
+        const BOOKMARKS_BAR_ID = '1';
+
+        // Search children of Bookmarks Bar for existing [TeamMarks] folder
+        try {
+            const children = await chrome.bookmarks.getChildren(BOOKMARKS_BAR_ID);
+            const existing = children.find(n => n.title === PARENT_TITLE && !n.url);
+            if (existing) {
+                return existing.id;
+            }
+        } catch (err) {
+            console.warn('[TeamMarks TeamMgmt] Failed to search Bookmarks Bar children:', err);
+        }
+
+        // Not found — create it
+        const folder = await chrome.bookmarks.create({
+            parentId: BOOKMARKS_BAR_ID,
+            title: PARENT_TITLE
+        });
+        console.info('[TeamMarks TeamMgmt] Created [TeamMarks] parent folder:', folder.id);
+        return folder.id;
+    }
+
+    /**
+     * Ensure [TeamMarks]/<teamName> exists. Creates it if absent.
+     * Returns { folderId, existed } so callers can detect conflicts.
+     *
+     * @param {string} teamName - Display name of the team
+     * @returns {Promise<{ folderId: string, existed: boolean }>}
+     */
+    async function _ensureTeamFolder(teamName) {
+        const parentId = await _ensureParentFolder();
+
+        // Search children for existing team folder
+        try {
+            const children = await chrome.bookmarks.getChildren(parentId);
+            const existing = children.find(n => n.title === teamName && !n.url);
+            if (existing) {
+                return { folderId: existing.id, existed: true };
+            }
+        } catch (err) {
+            console.warn('[TeamMarks TeamMgmt] Failed to search [TeamMarks] children:', err);
+        }
+
+        // Not found — create it
+        const folder = await chrome.bookmarks.create({ parentId, title: teamName });
+        console.info('[TeamMarks TeamMgmt] Created team folder:', teamName, '->', folder.id);
+        return { folderId: folder.id, existed: false };
+    }
+
+    /**
      * Create a new team in the given organization.
      * The current user is automatically added as an admin member.
+     * Auto-creates [TeamMarks]/<name> in the Bookmarks Bar and starts sync.
      *
      * @param {string} orgId - UUID of the organization to create the team in
      * @param {string} name - Display name for the team
@@ -267,8 +319,19 @@ const TeamManagement = (() => {
         });
         await _persistCache();
 
+        // Step 5: Auto-create [TeamMarks]/<name> and start sync
+        try {
+            const { folderId } = await _ensureTeamFolder(name.trim());
+            await setTeamBookmarksFolder(team.id, folderId);
+            // SyncEngine is loaded after TeamManagement in importScripts order,
+            // so we call it via the global — it's available by the time createTeam is invoked.
+            await SyncEngine.startSync(team.id);
+        } catch (folderErr) {
+            console.warn('[TeamMarks TeamMgmt] createTeam: folder/sync setup failed (non-fatal):', folderErr);
+        }
+
         console.info('[TeamMarks TeamMgmt] Created team:', team.name, '(invite:', team.invite_code + ')');
-        return team;
+        return { team };
     }
 
     /**
@@ -331,12 +394,35 @@ const TeamManagement = (() => {
 
         // Step 4: Refresh cache from Supabase — now that we're a member the
         // normal team_members query returns the full team row including invite_code.
-        // (find_team_by_invite_code only returns id+name, so pushing its result
-        // directly would leave invite_code undefined in the UI.)
         await refreshTeams();
 
-        console.info('[TeamMarks TeamMgmt] Joined team:', team.name);
-        return _teams.find(t => t.id === team.id) || team;
+        // Step 5: Check for local folder conflict
+        const teamObj = _teams.find(t => t.id === team.id) || team;
+        const teamName = teamObj.name || team.name;
+
+        const { folderId: existingFolderId, existed } = await _ensureTeamFolder(teamName);
+
+        if (existed) {
+            // Folder already exists locally — caller must resolve before sync starts
+            console.info('[TeamMarks TeamMgmt] Join conflict detected for team:', teamName);
+            return {
+                team: teamObj,
+                needsConflictResolution: true,
+                existingFolderId,
+                teamName
+            };
+        }
+
+        // No conflict — set folder and start sync
+        await setTeamBookmarksFolder(team.id, existingFolderId);
+        try {
+            await SyncEngine.startSync(team.id);
+        } catch (syncErr) {
+            console.warn('[TeamMarks TeamMgmt] joinTeam: startSync failed (non-fatal):', syncErr);
+        }
+
+        console.info('[TeamMarks TeamMgmt] Joined team:', teamName);
+        return { team: teamObj, needsConflictResolution: false };
     }
 
     /**
@@ -369,11 +455,6 @@ const TeamManagement = (() => {
 
         // Update local cache
         _teams = _teams.filter(t => t.id !== teamId);
-
-        // If leaving the current team, clear the selection
-        if (_currentTeamId === teamId) {
-            _currentTeamId = _teams.length > 0 ? _teams[0].id : null;
-        }
 
         // Clean up sync folder mapping
         delete _syncFolders[teamId];
@@ -423,11 +504,6 @@ const TeamManagement = (() => {
             role: row.role
         }));
 
-        // Ensure currentTeamId is still valid
-        if (_currentTeamId && !_teams.find(t => t.id === _currentTeamId)) {
-            _currentTeamId = _teams.length > 0 ? _teams[0].id : null;
-        }
-
         await _persistCache();
 
         console.info('[TeamMarks TeamMgmt] Refreshed', _teams.length, 'teams.');
@@ -467,24 +543,21 @@ const TeamManagement = (() => {
 
     /**
      * Normalize a raw storage entry for a team to the new object shape.
-     * Legacy format was a plain string (chromeFolderId only).
-     * New format: { chromeFolderId: string, subscribedFolderIds: string[] }
+     * Legacy format was a plain string (chromeFolderId only) or had subscribedFolderIds.
+     * New format: { chromeFolderId: string }
      *
      * @param {any} raw - Raw value from _syncFolders[teamId]
-     * @returns {{ chromeFolderId: string, subscribedFolderIds: string[] }|null}
+     * @returns {{ chromeFolderId: string }|null}
      */
     function _normalizeFolderEntry(raw) {
         if (!raw) return null;
         // Legacy: plain string
         if (typeof raw === 'string') {
-            return { chromeFolderId: raw, subscribedFolderIds: [] };
+            return { chromeFolderId: raw };
         }
-        // New shape: object
+        // Object shape (new or old with subscribedFolderIds)
         if (typeof raw === 'object' && raw.chromeFolderId) {
-            return {
-                chromeFolderId: raw.chromeFolderId,
-                subscribedFolderIds: Array.isArray(raw.subscribedFolderIds) ? raw.subscribedFolderIds : []
-            };
+            return { chromeFolderId: raw.chromeFolderId };
         }
         return null;
     }
@@ -510,43 +583,6 @@ const TeamManagement = (() => {
     }
 
     /**
-     * Set the currently active team. Persists to chrome.storage.local.
-     *
-     * @param {string} teamId - UUID of the team to make active
-     * @returns {Promise<void>}
-     * @throws {Error} If teamId is not in the user's team list
-     */
-    async function setCurrentTeam(teamId) {
-        if (!teamId) {
-            _currentTeamId = null;
-            await _persistCache();
-            return;
-        }
-
-        // Validate that the team exists in the user's list
-        if (!_teams.find(t => t.id === teamId)) {
-            throw new Error('[TeamMarks TeamMgmt] Cannot set current team: team not found in your team list.');
-        }
-
-        _currentTeamId = teamId;
-        await _persistCache();
-
-        console.info('[TeamMarks TeamMgmt] Current team set to:', teamId);
-    }
-
-    /**
-     * Get the currently active team from cache.
-     * Returns null if no team is selected or if the selected team is
-     * no longer in the user's team list.
-     *
-     * @returns {object|null} The current team object, or null
-     */
-    function getCurrentTeam() {
-        if (!_currentTeamId) return null;
-        return _teams.find(t => t.id === _currentTeamId) || null;
-    }
-
-    /**
      * Set the Chrome bookmark folder mapping for a team.
      * Writes the new object shape { chromeFolderId, subscribedFolderIds[] },
      * preserving any existing subscribedFolderIds.
@@ -562,12 +598,7 @@ const TeamManagement = (() => {
         }
 
         if (folderId) {
-            // Preserve existing subscribedFolderIds if present
-            const existing = _normalizeFolderEntry(_syncFolders[teamId]);
-            _syncFolders[teamId] = {
-                chromeFolderId: folderId,
-                subscribedFolderIds: existing ? existing.subscribedFolderIds : []
-            };
+            _syncFolders[teamId] = { chromeFolderId: folderId };
         } else {
             delete _syncFolders[teamId];
         }
@@ -577,46 +608,85 @@ const TeamManagement = (() => {
     }
 
     /**
-     * Get the subscribed Supabase folder IDs for a team.
-     * Returns [] when no subscriptions exist (= full-team sync mode).
+     * Resolve a folder conflict that arose during joinTeam.
+     * Called by the popup after the user selects a resolution in the conflict modal.
+     *
+     * Resolutions:
+     *   keep          - Rename existing folder to "<name> (backup)", create fresh folder, pull remote
+     *   replace-local - Use existing folder as-is; fullSync will push local content up
+     *   replace-remote - Clear existing folder contents; fullSync will pull remote content down
+     *   combine       - Use existing folder; applyDiff (LWW) merges both sets
+     *
+     * After any resolution, SyncEngine.startSync(teamId) is called to begin sync.
      *
      * @param {string} teamId - UUID of the team
-     * @returns {Promise<string[]>}
+     * @param {'keep'|'replace-local'|'replace-remote'|'combine'} resolution
+     * @param {string} existingFolderId - Chrome ID of the conflicting local folder
+     * @param {string} teamName - Display name of the team (used for folder naming)
+     * @returns {Promise<{ folderId: string }>}
      */
-    async function getSubscribedFolders(teamId) {
-        if (!teamId) return [];
-
-        // Refresh from storage
-        try {
-            const result = await chrome.storage.local.get(STORAGE_KEY_SYNC_FOLDERS);
-            _syncFolders = result[STORAGE_KEY_SYNC_FOLDERS] || {};
-        } catch (_) { /* use cached value */ }
-
-        const entry = _normalizeFolderEntry(_syncFolders[teamId]);
-        return entry ? entry.subscribedFolderIds : [];
-    }
-
-    /**
-     * Set the subscribed Supabase folder IDs for a team.
-     * Persists the new object shape, preserving chromeFolderId.
-     *
-     * @param {string} teamId - UUID of the team
-     * @param {string[]} supabaseIds - Array of subscribed Supabase folder UUIDs
-     * @returns {Promise<void>}
-     */
-    async function setSubscribedFolders(teamId, supabaseIds) {
-        if (!teamId) {
-            throw new Error('[TeamMarks TeamMgmt] Team ID is required.');
+    async function resolveJoinConflict(teamId, resolution, existingFolderId, teamName) {
+        if (!teamId || !resolution || !existingFolderId) {
+            throw new Error('[TeamMarks TeamMgmt] resolveJoinConflict: teamId, resolution, and existingFolderId are required.');
         }
 
-        const existing = _normalizeFolderEntry(_syncFolders[teamId]);
-        _syncFolders[teamId] = {
-            chromeFolderId: existing ? existing.chromeFolderId : null,
-            subscribedFolderIds: Array.isArray(supabaseIds) ? supabaseIds : []
-        };
+        let folderId = existingFolderId;
 
-        await _persistCache();
-        console.info('[TeamMarks TeamMgmt] Set subscribed folders for team', teamId, ':', supabaseIds);
+        switch (resolution) {
+            case 'keep': {
+                // Rename the old folder to "<name> (backup)"
+                await chrome.bookmarks.update(existingFolderId, { title: `${teamName} (backup)` });
+                // Create a fresh team folder
+                const { folderId: newFolderId } = await _ensureTeamFolder(teamName);
+                folderId = newFolderId;
+                await setTeamBookmarksFolder(teamId, folderId);
+                // fullSync will pull remote content into the fresh folder
+                break;
+            }
+
+            case 'replace-local': {
+                // Use existing folder; fullSync will push local bookmarks up to remote
+                await setTeamBookmarksFolder(teamId, existingFolderId);
+                break;
+            }
+
+            case 'replace-remote': {
+                // Clear all children of the existing folder, then fullSync pulls remote down
+                try {
+                    const children = await chrome.bookmarks.getChildren(existingFolderId);
+                    for (const child of children) {
+                        try {
+                            await chrome.bookmarks.removeTree(child.id);
+                        } catch (_) {
+                            try { await chrome.bookmarks.remove(child.id); } catch (__) { /* best effort */ }
+                        }
+                    }
+                } catch (err) {
+                    console.warn('[TeamMarks TeamMgmt] resolveJoinConflict replace-remote: could not clear folder:', err);
+                }
+                await setTeamBookmarksFolder(teamId, existingFolderId);
+                break;
+            }
+
+            case 'combine': {
+                // Use existing folder; fullSync runs applyDiff which merges by LWW
+                await setTeamBookmarksFolder(teamId, existingFolderId);
+                break;
+            }
+
+            default:
+                throw new Error(`[TeamMarks TeamMgmt] resolveJoinConflict: unknown resolution "${resolution}"`);
+        }
+
+        // Start sync — will run fullSync which applies the chosen strategy
+        try {
+            await SyncEngine.startSync(teamId);
+        } catch (syncErr) {
+            console.warn('[TeamMarks TeamMgmt] resolveJoinConflict: startSync failed (non-fatal):', syncErr);
+        }
+
+        console.info('[TeamMarks TeamMgmt] Join conflict resolved:', resolution, 'for team', teamId);
+        return { folderId };
     }
 
     // Return the public API
@@ -631,9 +701,6 @@ const TeamManagement = (() => {
         getTeamMembers,
         getTeamBookmarksFolder,
         setTeamBookmarksFolder,
-        getSubscribedFolders,
-        setSubscribedFolders,
-        setCurrentTeam,
-        getCurrentTeam
+        resolveJoinConflict
     });
 })();

@@ -1,11 +1,10 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <link rel="stylesheet" href="settings.css">
-    <title>TeamMarks — Settings</title>
+    <title>TeamMarks — Ajustes</title>
 </head>
 <body>
     <div class="app-container">
@@ -21,16 +20,16 @@
         <!-- Auth Section -->
         <section id="auth-section" class="section">
             <div class="section__header">
-                <h2 class="section__title">Account</h2>
-                <span id="auth-badge" class="section__badge section__badge--error">Not signed in</span>
+                <h2 class="section__title">Cuenta</h2>
+                <span id="auth-badge" class="section__badge section__badge--error">No conectado</span>
             </div>
 
             <!-- Signed out -->
             <div id="auth-signed-out">
                 <p style="font-size:14px; color:var(--color-text-secondary); margin-bottom:16px;">
-                    Sign in with your Google account to sync bookmarks with your team.
+                    Iniciá sesión con tu cuenta de Google para sincronizar marcadores con tu equipo.
                 </p>
-                <button id="btn-sign-in" class="btn btn--primary">Sign in with Google</button>
+                <button id="btn-sign-in" class="btn btn--primary">Iniciar sesión con Google</button>
             </div>
 
             <!-- Signed in -->
@@ -43,94 +42,43 @@
                     </div>
                 </div>
                 <div class="auth-section__actions">
-                    <button id="btn-sign-out" class="btn btn--danger">Sign out</button>
+                    <button id="btn-sign-out" class="btn btn--danger">Cerrar sesión</button>
                 </div>
             </div>
         </section>
 
-        <!-- Team Management Section -->
+        <!-- Team Management Section (shown when signed in) -->
         <section id="team-section" class="section" style="display:none;">
             <div class="section__header">
-                <h2 class="section__title">Teams</h2>
+                <h2 class="section__title">Mis teams</h2>
             </div>
 
             <!-- Team list -->
             <div id="team-list-container">
                 <div class="loading-state">
-                    <span class="spinner"></span> Loading teams…
+                    <span class="spinner"></span> Cargando teams…
                 </div>
             </div>
 
             <hr class="divider">
 
             <!-- Create Team -->
-            <h3 style="font-size:14px; font-weight:600; margin-bottom:8px;">Create a Team</h3>
+            <h3 style="font-size:14px; font-weight:600; margin-bottom:8px;">Crear un team</h3>
             <div class="form-group">
                 <div class="form-row">
-                    <input id="input-team-name" class="input" type="text" placeholder="Team name">
-                    <button id="btn-create-team" class="btn btn--primary">Create</button>
+                    <input id="input-team-name" class="input" type="text" placeholder="Nombre del team" maxlength="60">
+                    <button id="btn-create-team" class="btn btn--primary">Crear</button>
                 </div>
             </div>
 
             <hr class="divider">
 
             <!-- Join Team -->
-            <h3 style="font-size:14px; font-weight:600; margin-bottom:8px;">Join a Team</h3>
+            <h3 style="font-size:14px; font-weight:600; margin-bottom:8px;">Unirse a un team</h3>
             <div class="form-group">
                 <div class="form-row">
-                    <input id="input-invite-code" class="input input--code" type="text" placeholder="ABC123" maxlength="6">
-                    <button id="btn-join-team" class="btn btn--secondary">Join</button>
-                </div>
-            </div>
-        </section>
-
-        <!-- Sync Folder Picker Section -->
-        <section id="folder-section" class="section" style="display:none;">
-            <div class="section__header">
-                <h2 class="section__title">Sync Folder</h2>
-                <button id="btn-refresh-sync-folder" class="btn btn--small btn--secondary">Refresh</button>
-            </div>
-
-            <!-- Current mapping -->
-            <div id="current-mapping" class="mapping-display" style="display:none;">
-                <span id="mapping-team" class="mapping-display__team"></span>
-                <span class="mapping-display__arrow">→</span>
-                <span id="mapping-folder" class="mapping-display__folder"></span>
-            </div>
-
-            <p style="font-size:14px; color:var(--color-text-secondary); margin-bottom:12px;">
-                Choose which local bookmark folder syncs with your active team. All bookmarks inside this folder will be synced.
-            </p>
-
-            <!-- Folder tree -->
-            <div id="folder-picker" class="folder-picker">
-                <div class="loading-state">
-                    <span class="spinner"></span> Loading bookmarks…
-                </div>
-            </div>
-
-            <div id="folder-actions" style="margin-top:12px; display:none;">
-                <button id="btn-select-folder" class="btn btn--primary" disabled>Select this folder</button>
-                <button id="btn-clear-folder" class="btn btn--secondary" style="margin-left:8px;">Clear mapping</button>
-            </div>
-        </section>
-
-        <!-- Folder Subscription Section -->
-        <section id="folder-subscription-section" class="section" style="display:none;">
-            <div class="section__header">
-                <h2 class="section__title">Subscribed Folders</h2>
-                <button id="btn-refresh-folder-tree" class="btn btn--small btn--secondary">Refresh</button>
-            </div>
-
-            <p style="font-size:14px; color:var(--color-text-secondary); margin-bottom:12px;">
-                Choose which team folders to sync locally. Leave all unchecked to sync the entire team.
-            </p>
-
-            <div id="folder-subscription-status" style="font-size:13px; color:var(--color-text-secondary); margin-bottom:8px;"></div>
-
-            <div id="folder-subscription-tree">
-                <div class="loading-state">
-                    <span class="spinner"></span> Loading team folders…
+                    <input id="input-invite-code" class="input input--code" type="text" placeholder="Código de invitación" maxlength="10">
+                    <button id="btn-join-team" class="btn btn--secondary">Unirse</button>
                 </div>
             </div>
         </section>

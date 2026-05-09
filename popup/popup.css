@@ -462,3 +462,23 @@ body {
     color: var(--color-text-muted);
     font-size: 13px;
 }
+
+/* ── Setup nudge ─────────────────────────────────────── */
+
+.setup-nudge {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    background: var(--color-primary-light);
+    border: 1px solid rgba(37, 99, 235, 0.35);
+    border-radius: var(--radius);
+    padding: 8px 12px;
+    margin-bottom: 12px;
+}
+
+.setup-nudge__text {
+    font-size: 12px;
+    color: var(--color-text-secondary);
+    flex: 1;
+}
