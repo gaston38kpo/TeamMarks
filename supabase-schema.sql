@@ -138,6 +138,9 @@ CREATE POLICY "users_read_teammates" ON team_members
 CREATE POLICY "users_insert_own_membership" ON team_members
     FOR INSERT WITH CHECK (user_id = auth.uid());
 
+CREATE POLICY "users_delete_own_membership" ON team_members
+    FOR DELETE USING (user_id = auth.uid());
+
 CREATE POLICY "admins_delete_membership" ON team_members
     FOR DELETE USING (is_team_admin(team_id));
 
