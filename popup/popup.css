@@ -406,7 +406,45 @@ body {
     margin-bottom: 12px;
 }
 
-/* ── Empty / loading ─────────────────────────────────── */
+.status-row__right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.btn-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    font-size: 14px;
+    line-height: 1;
+    background: transparent;
+    color: var(--color-text-muted);
+    border: 1px solid transparent;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: color var(--transition), background var(--transition), border-color var(--transition);
+    flex-shrink: 0;
+}
+
+.btn-icon:hover:not(:disabled) {
+    color: var(--color-text);
+    background: var(--color-surface-2);
+    border-color: var(--color-border);
+}
+
+.btn-icon:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.btn-icon.spinning svg {
+    animation: spin 0.6s linear infinite;
+    color: var(--color-primary);
+}
 
 .empty-state {
     text-align: center;

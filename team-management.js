@@ -329,18 +329,14 @@ const TeamManagement = (() => {
             throw new Error(`Failed to join team: ${joinError.message}`);
         }
 
-        // Step 4: Update local cache
-        _teams.push({
-            id: team.id,
-            name: team.name,
-            slug: team.slug,
-            invite_code: team.invite_code,
-            role: 'member'
-        });
-        await _persistCache();
+        // Step 4: Refresh cache from Supabase — now that we're a member the
+        // normal team_members query returns the full team row including invite_code.
+        // (find_team_by_invite_code only returns id+name, so pushing its result
+        // directly would leave invite_code undefined in the UI.)
+        await refreshTeams();
 
         console.info('[TeamMarks TeamMgmt] Joined team:', team.name);
-        return team;
+        return _teams.find(t => t.id === team.id) || team;
     }
 
     /**

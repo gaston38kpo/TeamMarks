@@ -40,6 +40,7 @@
     const btnSelectFolder = $('#btn-select-folder');
     const btnClearFolder = $('#btn-clear-folder');
     const folderActions = $('#folder-actions');
+    const btnRefreshSyncFolder = $('#btn-refresh-sync-folder');
 
     const folderSubscriptionSection = $('#folder-subscription-section');
     const folderSubscriptionTree = $('#folder-subscription-tree');
@@ -723,6 +724,18 @@
             // already handled inside loadFolderSubscriptions
         } finally {
             setLoading(btnRefreshFolderTree, false);
+        }
+    });
+
+    btnRefreshSyncFolder.addEventListener('click', async () => {
+        setLoading(btnRefreshSyncFolder, true);
+        try {
+            await loadBookmarkTree();
+            renderFolderPicker();
+        } catch (_) {
+            showToast('Failed to refresh folder list.', 'error');
+        } finally {
+            setLoading(btnRefreshSyncFolder, false);
         }
     });
 

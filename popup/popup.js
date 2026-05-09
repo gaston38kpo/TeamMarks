@@ -33,6 +33,7 @@
     const btnSyncNow = $('#btn-sync-now');
     const btnSettings = $('#btn-settings');
     const btnSignIn = $('#btn-sign-in');
+    const btnRefreshFolder = $('#btn-refresh-folder');
 
     // ================================================================
     // State
@@ -296,6 +297,22 @@
 
     btnSettings.addEventListener('click', () => {
         chrome.runtime.openOptionsPage();
+    });
+
+    btnRefreshFolder.addEventListener('click', async () => {
+        btnRefreshFolder.disabled = true;
+        btnRefreshFolder.classList.add('spinning');
+        try {
+            const result = await chrome.storage.local.get('teammarks_syncFolders');
+            syncFolderMap = result.teammarks_syncFolders || {};
+            bookmarkTreeCache = await chrome.bookmarks.getTree();
+            renderStatus();
+        } catch (err) {
+            console.error('[TeamMarks Popup] Refresh folder failed:', err);
+        } finally {
+            btnRefreshFolder.disabled = false;
+            btnRefreshFolder.classList.remove('spinning');
+        }
     });
 
     // ================================================================
