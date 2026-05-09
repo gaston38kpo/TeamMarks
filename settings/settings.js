@@ -63,6 +63,9 @@
     // Folder subscription state
     let currentSubscribedIds = [];
 
+    // Onboarding wizard state
+    let wizardStep = 0; // 0 = inactive; 1–4 = active step
+
     // ================================================================
     // Helper — send message to service worker
     // ================================================================
@@ -168,6 +171,7 @@
             renderAuth();
             showToast('Signed in successfully!', 'success');
             await loadTeams();
+            if (wizardStep === 1) advanceStep();
         } catch (err) {
             showToast('Sign in failed: ' + err.message, 'error');
         } finally {
@@ -334,6 +338,7 @@
             inputTeamName.value = '';
             await loadTeams();
             showToast('Team created!', 'success');
+            if (wizardStep === 2) advanceStep();
         } catch (err) {
             showToast('Failed to create team: ' + err.message, 'error');
         } finally {
@@ -359,6 +364,7 @@
             inputInviteCode.value = '';
             await loadTeams();
             showToast('Joined team!', 'success');
+            if (wizardStep === 2) advanceStep();
         } catch (err) {
             showToast('Failed to join team: ' + err.message, 'error');
         } finally {
@@ -524,6 +530,7 @@
             syncFolderMap[currentTeamId] = selectedFolderId;
             renderTeamList();
             showToast('Sync folder set!', 'success');
+            if (wizardStep === 3) advanceStep();
         } catch (err) {
             showToast('Failed to set sync folder: ' + err.message, 'error');
         } finally {
@@ -750,11 +757,113 @@
     }
 
     // ================================================================
+    // Onboarding Wizard
+    // ================================================================
+
+    function isFullyConfigured() {
+        return !!(currentSession &&
+                  currentTeams.length > 0 &&
+                  currentTeamId &&
+                  syncFolderMap[currentTeamId]);
+    }
+
+    async function initOnboarding() {
+        const { teammarks_firstRun } = await chrome.storage.local.get('teammarks_firstRun');
+        if (!teammarks_firstRun) return; // not a fresh install
+
+        if (isFullyConfigured()) {
+            await completeOnboarding(); // already configured, skip wizard
+            return;
+        }
+
+        // Determine which step to start at
+        if (!currentSession) {
+            renderStep(1);
+        } else if (currentTeams.length === 0) {
+            renderStep(2);
+        } else {
+            renderStep(3);
+        }
+    }
+
+    function renderStep(step) {
+        wizardStep = step;
+
+        const wizardSection = document.getElementById('wizard');
+        wizardSection.style.display = '';
+
+        // Update step bar
+        for (let i = 1; i <= 4; i++) {
+            const el = document.getElementById('wizard-step-' + i);
+            if (!el) continue;
+            el.classList.toggle('wizard__step--active', i === step);
+            el.classList.toggle('wizard__step--done', i < step);
+        }
+
+        // Update step indicator
+        document.getElementById('wizard-step-indicator').textContent = 'Step ' + step + ' of 4';
+
+        // Show only the relevant section; hide all others
+        const sectionMap = { 1: 'auth-section', 2: 'team-section', 3: 'folder-section', 4: null };
+        const allSections = ['auth-section', 'team-section', 'folder-section', 'folder-subscription-section'];
+        allSections.forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.style.display = (id === sectionMap[step]) ? '' : 'none';
+        });
+
+        // Wizard controls
+        const btnNext = document.getElementById('btn-wizard-next');
+        const btnSkip = document.getElementById('btn-wizard-skip');
+        const btnDone = document.getElementById('btn-wizard-done');
+
+        if (step === 4) {
+            // Final step — subscriptions (skippable)
+            btnNext.style.display = 'none';
+            btnSkip.style.display = '';
+            btnDone.style.display = '';
+            document.getElementById('folder-subscription-section').style.display = '';
+        } else {
+            btnNext.style.display = 'none';
+            btnSkip.style.display = 'none';
+            btnDone.style.display = 'none';
+        }
+    }
+
+    function advanceStep() {
+        if (wizardStep === 0) return;
+        if (wizardStep >= 4) {
+            completeOnboarding();
+            return;
+        }
+        renderStep(wizardStep + 1);
+    }
+
+    async function completeOnboarding() {
+        await chrome.storage.local.set({ teammarks_onboarded: true });
+        await chrome.storage.local.remove('teammarks_firstRun');
+        wizardStep = 0;
+
+        // Hide wizard, restore normal settings view
+        const wizardSection = document.getElementById('wizard');
+        wizardSection.style.display = 'none';
+
+        // Show all sections that should be visible given current auth state
+        renderAuth();
+    }
+
+    // Wizard button handlers
+    document.getElementById('btn-wizard-skip')?.addEventListener('click', completeOnboarding);
+    document.getElementById('btn-wizard-done')?.addEventListener('click', completeOnboarding);
+
+    // ================================================================
     // Initialization
     // ================================================================
 
     async function init() {
         await initAuth();
+
+        // Show the onboarding wizard for first-run installs
+        await initOnboarding();
 
         if (currentSession) {
             // Load teams and bookmarks in parallel, don't let one block the other
