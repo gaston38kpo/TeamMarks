@@ -646,6 +646,57 @@ body {
     margin-bottom: 12px;
 }
 
+/* ── Onboarding Wizard ───────────────────────────────── */
+
+.wizard__header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 16px;
+    gap: 12px;
+}
+
+.wizard__step-indicator {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    white-space: nowrap;
+}
+
+.wizard__step-bar {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 20px;
+}
+
+.wizard__step {
+    flex: 1;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--color-surface-2);
+    transition: background var(--transition);
+}
+
+.wizard__step--active {
+    background: var(--color-primary);
+}
+
+.wizard__step--done {
+    background: var(--color-success);
+}
+
+.wizard__controls {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--color-border);
+}
+
 /* ── Responsive ─────────────────────────────────────── */
 
 @media (max-width: 600px) {
