@@ -68,6 +68,44 @@ async function initTeamMarks() {
         console.error('[TeamMarks] Auth init failed:', err);
     }
 
+    // 1b. Migrate legacy storage keys — run before TeamManagement.init()
+    //     Removed keys: teammarks_firstRun, teammarks_onboarded, teammarks_currentTeamId
+    //     teammarks_lastSyncTimestamp → teammarks_lastSyncTimestamps (per-team Map)
+    try {
+        const legacyResult = await chrome.storage.local.get([
+            'teammarks_lastSyncTimestamp',
+            'teammarks_currentTeamId',
+            'teammarks_firstRun',
+            'teammarks_onboarded'
+        ]);
+
+        const keysToRemove = [
+            'teammarks_firstRun',
+            'teammarks_onboarded',
+            'teammarks_currentTeamId'
+        ];
+
+        // Migrate scalar timestamp → per-team Map
+        if (legacyResult['teammarks_lastSyncTimestamp']) {
+            const legacyTs = legacyResult['teammarks_lastSyncTimestamp'];
+            const currentTeamId = legacyResult['teammarks_currentTeamId'] || null;
+            if (currentTeamId) {
+                const existing = await chrome.storage.local.get('teammarks_lastSyncTimestamps');
+                const tsMap = existing['teammarks_lastSyncTimestamps'] || {};
+                if (!tsMap[currentTeamId]) {
+                    tsMap[currentTeamId] = legacyTs;
+                    await chrome.storage.local.set({ teammarks_lastSyncTimestamps: tsMap });
+                }
+            }
+            keysToRemove.push('teammarks_lastSyncTimestamp');
+        }
+
+        await chrome.storage.local.remove(keysToRemove);
+        console.info('[TeamMarks] Storage migration complete. Removed stale keys.');
+    } catch (err) {
+        console.warn('[TeamMarks] Storage migration failed (non-fatal):', err);
+    }
+
     // 2. Initialize team management cache from storage
     try {
         await TeamManagement.init();
@@ -89,17 +127,15 @@ async function initTeamMarks() {
         console.error('[TeamMarks] Sync engine init failed:', err);
     }
 
-    // 4. If authenticated and have a current team, start sync
+    // 4. If authenticated, start sync for all known teams
     if (session) {
-        const currentTeam = TeamManagement.getCurrentTeam();
-        if (currentTeam) {
+        const teams = TeamManagement.getMyTeams();
+        for (const team of teams) {
             try {
-                const folderInfo = await TeamManagement.getTeamBookmarksFolder(currentTeam.id);
-                const folderId = folderInfo ? folderInfo.chromeFolderId : undefined;
-                await SyncEngine.startSync(currentTeam.id, folderId);
-                console.info('[TeamMarks] Auto-resumed sync for team:', currentTeam.name);
+                await SyncEngine.startSync(team.id);
+                console.info('[TeamMarks] Auto-resumed sync for team:', team.name);
             } catch (err) {
-                console.error('[TeamMarks] Auto-resume sync failed:', err);
+                console.error('[TeamMarks] Auto-resume sync failed for team', team.id, ':', err);
             }
         }
     }
@@ -497,10 +533,9 @@ async function handleMessage(message, sender) {
 chrome.runtime.onInstalled.addListener((details) => {
     console.info('[TeamMarks] Extension installed/updated:', details.reason);
 
-    // On fresh install: set the first-run flag so the settings wizard shows
+    // On fresh install — no first-run flag needed (wizard removed in simplified flow)
     if (details.reason === 'install') {
-        chrome.storage.local.set({ teammarks_firstRun: true });
-        console.info('[TeamMarks] First-run flag set.');
+        console.info('[TeamMarks] Fresh install detected.');
     }
 
     // Register the catch-up alarm immediately on install
