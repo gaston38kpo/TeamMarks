@@ -160,6 +160,7 @@
 
             renderTeamSwitcher();
             renderStatus();
+            renderNudge();
         } catch (err) {
             console.error('[TeamMarks Popup] Failed to load teams/status:', err);
         }
@@ -277,6 +278,23 @@
         }
         return null;
     }
+
+    // ================================================================
+    // Setup nudge banner
+    // ================================================================
+
+    function renderNudge() {
+        const nudge = document.getElementById('setup-nudge');
+        if (!nudge) return;
+        const isIncomplete = !currentSession ||
+                             currentTeams.length === 0 ||
+                             !syncFolderMap[currentTeamId];
+        nudge.style.display = isIncomplete ? '' : 'none';
+    }
+
+    document.getElementById('btn-setup-nudge')?.addEventListener('click', () => {
+        chrome.tabs.create({ url: chrome.runtime.getURL('settings/settings.html') });
+    });
 
     // ================================================================
     // Quick actions
