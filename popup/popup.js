@@ -1,8 +1,8 @@
 /**
- * TeamMarks — Popup Logic
+ * TeamMarks — Popup Logic (multi-team rewrite)
  *
- * Displays compact sync status, team switcher, and quick actions.
- * Communication with the service worker via chrome.runtime.sendMessage().
+ * State machine: loading → signed-out | signed-in (no-teams | has-teams)
+ * Conflict resolution UI shown inline after joinTeam returns needsConflictResolution.
  */
 
 (function () {
@@ -14,40 +14,55 @@
 
     const $ = (sel) => document.querySelector(sel);
 
-    const authSignedIn = $('#auth-signed-in');
-    const authSignedOut = $('#auth-signed-out');
-    const popupLoading = $('#popup-loading');
+    const popupLoading   = $('#popup-loading');
+    const authSignedOut  = $('#auth-signed-out');
+    const authSignedIn   = $('#auth-signed-in');
 
-    const userAvatar = $('#user-avatar');
-    const userName = $('#user-name');
-    const userEmail = $('#user-email');
+    const userAvatar     = $('#user-avatar');
+    const userName       = $('#user-name');
+    const userEmail      = $('#user-email');
 
-    const teamSwitcher = $('#team-switcher');
-    const teamSelect = $('#team-select');
+    const errorDisplay   = $('#error-display');
 
-    const connectionStatus = $('#connection-status');
-    const lastSync = $('#last-sync');
-    const syncFolder = $('#sync-folder');
+    const conflictBox    = $('#conflict-box');
+    const conflictTeamName = $('#conflict-team-name');
+    const conflictStep2  = $('#conflict-step-2');
+    const btnConfirmConflict = $('#btn-confirm-conflict');
 
-    const errorDisplay = $('#error-display');
-    const btnSyncNow = $('#btn-sync-now');
-    const btnSettings = $('#btn-settings');
-    const btnSignIn = $('#btn-sign-in');
-    const btnRefreshFolder = $('#btn-refresh-folder');
+    const noTeamsState   = $('#no-teams-state');
+    const hasTeamsState  = $('#has-teams-state');
+    const teamList       = $('#team-list');
+
+    const btnCreateTeam  = $('#btn-create-team');
+    const btnJoinTeam    = $('#btn-join-team');
+    const btnAddTeamCreate = $('#btn-add-team-create');
+    const btnAddTeamJoin  = $('#btn-add-team-join');
+
+    const formCreate     = $('#form-create');
+    const formJoin       = $('#form-join');
+    const inputTeamName  = $('#input-team-name');
+    const inputInviteCode = $('#input-invite-code');
+    const btnCreateSubmit = $('#btn-create-submit');
+    const btnJoinSubmit  = $('#btn-join-submit');
+
+    const syncRow        = $('#sync-row');
+    const btnSyncNow     = $('#btn-sync-now');
+    const btnSettings    = $('#btn-settings');
+    const btnSignIn      = $('#btn-sign-in');
 
     // ================================================================
     // State
     // ================================================================
 
-    let currentSession = null;
-    let currentTeams = [];
-    let currentTeamId = null;
-    let syncStatusData = null;
-    let syncFolderMap = {};
-    let bookmarkTreeCache = null;
+    const state = {
+        session: null,
+        teams: [],
+        syncStatuses: {},   // teamId → { connected, lastSync, error }
+        pendingConflict: null  // { teamId, existingFolderId, teamName }
+    };
 
     // ================================================================
-    // Helper — send message to service worker
+    // SW message helper
     // ================================================================
 
     function sendMessage(action, data = {}) {
@@ -67,20 +82,29 @@
     }
 
     // ================================================================
-    // Loading state
+    // Utilities
     // ================================================================
 
-    function showLoading(visible) {
-        popupLoading.style.display = visible ? '' : 'none';
-        if (visible) {
-            authSignedIn.style.display = 'none';
-            authSignedOut.style.display = 'none';
-        }
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = String(text);
+        return div.innerHTML;
     }
 
-    // ================================================================
-    // Button loading helper
-    // ================================================================
+    function formatTime(isoString) {
+        if (!isoString) return 'Nunca';
+        try {
+            const diff = Date.now() - new Date(isoString).getTime();
+            const min = Math.floor(diff / 60000);
+            if (min < 1) return 'Ahora';
+            if (min < 60) return min + 'm';
+            const hr = Math.floor(min / 60);
+            if (hr < 24) return hr + 'h';
+            return new Date(isoString).toLocaleDateString();
+        } catch (_) {
+            return isoString;
+        }
+    }
 
     function setLoading(btn, loading) {
         if (loading) {
@@ -93,275 +117,362 @@
         }
     }
 
-    // ================================================================
-    // Auth
-    // ================================================================
-
-    async function loadSession() {
-        try {
-            const session = await sendMessage('getSession');
-            currentSession = session;
-        } catch (_) {
-            currentSession = null;
-        }
+    function showError(msg) {
+        errorDisplay.textContent = msg;
+        errorDisplay.style.display = '';
     }
 
-    function renderAuth() {
-        if (currentSession) {
-            authSignedIn.style.display = '';
-            authSignedOut.style.display = 'none';
+    function clearError() {
+        errorDisplay.style.display = 'none';
+        errorDisplay.textContent = '';
+    }
 
-            const email = currentSession.email || 'Unknown';
-            const name = email.split('@')[0];
-            userName.textContent = name;
-            userEmail.textContent = email;
-            userAvatar.textContent = name.charAt(0).toUpperCase();
-        } else {
-            authSignedIn.style.display = 'none';
+    // ================================================================
+    // Rendering — master render
+    // ================================================================
+
+    function render() {
+        popupLoading.style.display = 'none';
+
+        if (!state.session) {
             authSignedOut.style.display = '';
+            authSignedIn.style.display = 'none';
+            return;
+        }
+
+        // Signed in
+        authSignedOut.style.display = 'none';
+        authSignedIn.style.display = '';
+
+        // User info
+        const email = state.session.email || '';
+        const name = email.split('@')[0] || email;
+        userName.textContent = name;
+        userEmail.textContent = email;
+        userAvatar.textContent = name.charAt(0).toUpperCase() || '?';
+
+        // Conflict UI overrides everything else
+        if (state.pendingConflict) {
+            renderConflictUI();
+            noTeamsState.style.display = 'none';
+            hasTeamsState.style.display = 'none';
+            formCreate.classList.remove('is-visible');
+            formJoin.classList.remove('is-visible');
+            syncRow.style.display = 'none';
+            return;
+        }
+
+        conflictBox.style.display = 'none';
+
+        if (state.teams.length === 0) {
+            noTeamsState.style.display = '';
+            hasTeamsState.style.display = 'none';
+            syncRow.style.display = 'none';
+        } else {
+            noTeamsState.style.display = 'none';
+            hasTeamsState.style.display = '';
+            syncRow.style.display = '';
+            renderTeamList();
         }
     }
+
+    // ================================================================
+    // Rendering — team list
+    // ================================================================
+
+    function renderTeamList() {
+        teamList.innerHTML = state.teams.map(team => {
+            const status = state.syncStatuses[team.id] || {};
+            const dotClass = status.connected
+                ? 'team-card__dot team-card__dot--connected'
+                : 'team-card__dot';
+            const lastSync = status.lastSync ? formatTime(status.lastSync) : 'Nunca';
+            const inviteCode = team.invite_code ? escapeHtml(team.invite_code) : '—';
+
+            return `
+                <li class="team-card">
+                    <span class="${dotClass}"></span>
+                    <div class="team-card__info">
+                        <div class="team-card__name">${escapeHtml(team.name)}</div>
+                        <div class="team-card__meta">Código: ${inviteCode} · ${lastSync}</div>
+                    </div>
+                    <button class="team-card__leave" data-team-id="${escapeHtml(team.id)}" data-team-name="${escapeHtml(team.name)}">Salir</button>
+                </li>`;
+        }).join('');
+
+        // Bind leave buttons
+        teamList.querySelectorAll('.team-card__leave').forEach(btn => {
+            btn.addEventListener('click', () => leaveTeam(btn.dataset.teamId, btn.dataset.teamName));
+        });
+    }
+
+    // ================================================================
+    // Rendering — conflict UI
+    // ================================================================
+
+    function renderConflictUI() {
+        conflictBox.style.display = '';
+        const p = state.pendingConflict;
+        conflictTeamName.textContent = `El team "${p.teamName}" ya tiene una carpeta local. ¿Qué hacemos?`;
+
+        // Reset to step 1
+        conflictStep2.style.display = 'none';
+        const radios = conflictBox.querySelectorAll('input[name="conflict-choice"]');
+        radios[0].checked = true;
+        conflictBox.querySelectorAll('input[name="conflict-replace"]')[0].checked = true;
+    }
+
+    // ================================================================
+    // Conflict radio logic
+    // ================================================================
+
+    conflictBox.querySelectorAll('input[name="conflict-choice"]').forEach(radio => {
+        radio.addEventListener('change', () => {
+            const val = conflictBox.querySelector('input[name="conflict-choice"]:checked')?.value;
+            conflictStep2.style.display = val === 'replace' ? '' : 'none';
+        });
+    });
+
+    btnConfirmConflict.addEventListener('click', async () => {
+        const choice = conflictBox.querySelector('input[name="conflict-choice"]:checked')?.value;
+        let resolution;
+        if (choice === 'keep') {
+            resolution = 'keep';
+        } else {
+            resolution = conflictBox.querySelector('input[name="conflict-replace"]:checked')?.value || 'combine';
+        }
+
+        const p = state.pendingConflict;
+        setLoading(btnConfirmConflict, true);
+        clearError();
+        try {
+            await sendMessage('resolveJoinConflict', {
+                teamId: p.teamId,
+                resolution,
+                existingFolderId: p.existingFolderId
+            });
+            state.pendingConflict = null;
+            await refreshTeamsAndStatus();
+            render();
+        } catch (err) {
+            showError('Error al resolver conflicto: ' + err.message);
+        } finally {
+            setLoading(btnConfirmConflict, false);
+        }
+    });
+
+    // ================================================================
+    // Sign in / out
+    // ================================================================
 
     btnSignIn.addEventListener('click', async () => {
         setLoading(btnSignIn, true);
+        clearError();
         try {
             const session = await sendMessage('signIn');
-            currentSession = session;
-            renderAuth();
-            await loadTeamAndStatus();
+            state.session = session;
+            await refreshTeamsAndStatus();
+            render();
         } catch (err) {
-            // Show error in popup
-            errorDisplay.textContent = 'Sign in failed: ' + err.message;
-            errorDisplay.style.display = '';
+            showError('Error al iniciar sesión: ' + err.message);
         } finally {
             setLoading(btnSignIn, false);
         }
     });
 
     // ================================================================
-    // Teams & status
+    // Create / join team toggles (no-teams state)
     // ================================================================
 
-    async function loadTeamAndStatus() {
-        if (!currentSession) return;
+    btnCreateTeam.addEventListener('click', () => {
+        formCreate.classList.toggle('is-visible');
+        formJoin.classList.remove('is-visible');
+        if (formCreate.classList.contains('is-visible')) inputTeamName.focus();
+    });
 
+    btnJoinTeam.addEventListener('click', () => {
+        formJoin.classList.toggle('is-visible');
+        formCreate.classList.remove('is-visible');
+        if (formJoin.classList.contains('is-visible')) inputInviteCode.focus();
+    });
+
+    // has-teams add-team buttons
+    btnAddTeamCreate.addEventListener('click', () => {
+        formCreate.classList.toggle('is-visible');
+        formJoin.classList.remove('is-visible');
+        if (formCreate.classList.contains('is-visible')) inputTeamName.focus();
+    });
+
+    btnAddTeamJoin.addEventListener('click', () => {
+        formJoin.classList.toggle('is-visible');
+        formCreate.classList.remove('is-visible');
+        if (formJoin.classList.contains('is-visible')) inputInviteCode.focus();
+    });
+
+    // ================================================================
+    // Create team submit
+    // ================================================================
+
+    btnCreateSubmit.addEventListener('click', async () => {
+        const name = inputTeamName.value.trim();
+        if (!name) { inputTeamName.focus(); return; }
+
+        setLoading(btnCreateSubmit, true);
+        clearError();
         try {
-            const [teams, status] = await Promise.all([
-                sendMessage('getTeams'),
-                sendMessage('syncStatus')
-            ]);
-            currentTeams = teams || [];
-            currentTeamId = status?.teamId || null;
-            syncStatusData = status;
-
-            // Load sync folder map
-            const result = await chrome.storage.local.get('teammarks_syncFolders');
-            syncFolderMap = result.teammarks_syncFolders || {};
-
-            renderTeamSwitcher();
-            renderStatus();
-            renderNudge();
+            const orgId = '00000000-0000-0000-0000-000000000000';
+            await sendMessage('createTeam', { orgId, name });
+            inputTeamName.value = '';
+            formCreate.classList.remove('is-visible');
+            await refreshTeamsAndStatus();
+            render();
         } catch (err) {
-            console.error('[TeamMarks Popup] Failed to load teams/status:', err);
-        }
-    }
-
-    function renderTeamSwitcher() {
-        if (currentTeams.length === 0) {
-            teamSwitcher.style.display = 'none';
-            return;
-        }
-
-        teamSwitcher.style.display = '';
-
-        // Build options
-        const optionsHtml = currentTeams.map(team =>
-            `<option value="${escapeAttr(team.id)}" ${team.id === currentTeamId ? 'selected' : ''}>${escapeHtml(team.name)}</option>`
-        ).join('');
-
-        teamSelect.innerHTML = '<option value="">Select a team…</option>' + optionsHtml;
-    }
-
-    teamSelect.addEventListener('change', async () => {
-        const teamId = teamSelect.value;
-        if (!teamId) return;
-
-        btnSyncNow.disabled = true;
-        try {
-            await sendMessage('selectTeam', { teamId });
-            currentTeamId = teamId;
-            await loadTeamAndStatus();
-        } catch (err) {
-            errorDisplay.textContent = 'Failed to switch team: ' + err.message;
-            errorDisplay.style.display = '';
+            showError('Error al crear team: ' + err.message);
         } finally {
-            btnSyncNow.disabled = false;
+            setLoading(btnCreateSubmit, false);
         }
     });
 
+    inputTeamName.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') btnCreateSubmit.click();
+    });
+
     // ================================================================
-    // Status display
+    // Join team submit
     // ================================================================
 
-    function renderStatus() {
-        // Connection status
-        if (syncStatusData) {
-            const connected = syncStatusData.connected;
-            const hasError = syncStatusData.error;
+    btnJoinSubmit.addEventListener('click', async () => {
+        const inviteCode = inputInviteCode.value.trim().toUpperCase();
+        if (!inviteCode) { inputInviteCode.focus(); return; }
 
-            if (hasError) {
-                connectionStatus.innerHTML = `<span class="connection-badge connection-badge--offline"><span class="connection-badge__dot"></span>Error</span>`;
-                errorDisplay.textContent = syncStatusData.error;
-                errorDisplay.style.display = '';
-            } else if (connected) {
-                connectionStatus.innerHTML = `<span class="connection-badge connection-badge--connected"><span class="connection-badge__dot"></span>Connected</span>`;
-                errorDisplay.style.display = 'none';
-            } else if (currentTeamId) {
-                connectionStatus.innerHTML = `<span class="connection-badge connection-badge--reconnecting"><span class="connection-badge__dot"></span>Reconnecting</span>`;
-                errorDisplay.style.display = 'none';
-            } else {
-                connectionStatus.innerHTML = `<span class="connection-badge connection-badge--offline"><span class="connection-badge__dot"></span>Offline</span>`;
-                errorDisplay.style.display = 'none';
-            }
-
-            // Last sync
-            if (syncStatusData.lastSync) {
-                lastSync.textContent = formatTime(syncStatusData.lastSync);
-            } else {
-                lastSync.textContent = 'Never';
-            }
-        } else {
-            connectionStatus.innerHTML = `<span class="connection-badge connection-badge--offline"><span class="connection-badge__dot"></span>Offline</span>`;
-            lastSync.textContent = 'Never';
-        }
-
-        // Sync folder
-        if (currentTeamId && syncFolderMap[currentTeamId]) {
-            const folderId = syncFolderMap[currentTeamId];
-            syncFolder.textContent = getFolderName(folderId) || folderId;
-        } else {
-            syncFolder.textContent = 'Not set';
-        }
-    }
-
-    function formatTime(isoString) {
-        if (!isoString) return 'Never';
+        setLoading(btnJoinSubmit, true);
+        clearError();
         try {
-            const date = new Date(isoString);
-            const now = new Date();
-            const diffMs = now - date;
-            const diffMin = Math.floor(diffMs / 60000);
+            const result = await sendMessage('joinTeam', { inviteCode });
+            inputInviteCode.value = '';
+            formJoin.classList.remove('is-visible');
 
-            if (diffMin < 1) return 'Just now';
-            if (diffMin < 60) return diffMin + 'm ago';
-            const diffHr = Math.floor(diffMin / 60);
-            if (diffHr < 24) return diffHr + 'h ago';
-            return date.toLocaleDateString();
-        } catch (_) {
-            return isoString;
-        }
-    }
-
-    function getFolderName(folderId) {
-        // Try to find in the bookmark tree (loaded asynchronously)
-        if (!bookmarkTreeCache) return null;
-        return findFolderName(bookmarkTreeCache[0], folderId);
-    }
-
-    function findFolderName(node, folderId) {
-        if (node.id === folderId) return node.title || 'Bookmarks';
-        if (node.children) {
-            for (const child of node.children) {
-                const found = findFolderName(child, folderId);
-                if (found) return found;
+            if (result && result.needsConflictResolution) {
+                state.pendingConflict = {
+                    teamId: result.team?.id || result.teamId,
+                    existingFolderId: result.existingFolderId,
+                    teamName: result.teamName || result.team?.name || inviteCode
+                };
+                // Add team to list so it's available once conflict resolves
+                await refreshTeamsAndStatus();
+                render();
+            } else {
+                await refreshTeamsAndStatus();
+                render();
             }
+        } catch (err) {
+            showError('Error al unirse al team: ' + err.message);
+        } finally {
+            setLoading(btnJoinSubmit, false);
         }
-        return null;
-    }
+    });
 
-    // ================================================================
-    // Setup nudge banner
-    // ================================================================
-
-    function renderNudge() {
-        const nudge = document.getElementById('setup-nudge');
-        if (!nudge) return;
-        const isIncomplete = !currentSession ||
-                             currentTeams.length === 0 ||
-                             !syncFolderMap[currentTeamId];
-        nudge.style.display = isIncomplete ? '' : 'none';
-    }
-
-    document.getElementById('btn-setup-nudge')?.addEventListener('click', () => {
-        chrome.tabs.create({ url: chrome.runtime.getURL('settings/settings.html') });
+    inputInviteCode.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') btnJoinSubmit.click();
     });
 
     // ================================================================
-    // Quick actions
+    // Leave team
+    // ================================================================
+
+    async function leaveTeam(teamId, teamName) {
+        if (!confirm(`¿Salir del team "${teamName}"?`)) return;
+        clearError();
+        try {
+            await sendMessage('leaveTeam', { teamId });
+            await refreshTeamsAndStatus();
+            render();
+        } catch (err) {
+            showError('Error al salir del team: ' + err.message);
+        }
+    }
+
+    // ================================================================
+    // Sync Now
     // ================================================================
 
     btnSyncNow.addEventListener('click', async () => {
         setLoading(btnSyncNow, true);
+        clearError();
         try {
             await sendMessage('manualSync');
-            await loadTeamAndStatus();
+            await refreshTeamsAndStatus();
+            render();
         } catch (err) {
-            errorDisplay.textContent = 'Sync failed: ' + err.message;
-            errorDisplay.style.display = '';
+            showError('Error al sincronizar: ' + err.message);
         } finally {
             setLoading(btnSyncNow, false);
         }
     });
 
+    // ================================================================
+    // Settings button
+    // ================================================================
+
     btnSettings.addEventListener('click', () => {
         chrome.runtime.openOptionsPage();
     });
 
-    btnRefreshFolder.addEventListener('click', async () => {
-        btnRefreshFolder.disabled = true;
-        btnRefreshFolder.classList.add('spinning');
+    // ================================================================
+    // Data loading
+    // ================================================================
+
+    async function refreshTeamsAndStatus() {
+        if (!state.session) return;
+
         try {
-            const result = await chrome.storage.local.get('teammarks_syncFolders');
-            syncFolderMap = result.teammarks_syncFolders || {};
-            bookmarkTreeCache = await chrome.bookmarks.getTree();
-            renderStatus();
+            const [teams, statusData] = await Promise.all([
+                sendMessage('getTeams'),
+                sendMessage('syncStatus').catch(() => null)
+            ]);
+
+            state.teams = teams || [];
+
+            // Build syncStatuses map from multi-team response
+            state.syncStatuses = {};
+            if (statusData && Array.isArray(statusData.teams)) {
+                for (const t of statusData.teams) {
+                    state.syncStatuses[t.teamId] = {
+                        connected: t.connected,
+                        lastSync: t.lastSync,
+                        error: t.error
+                    };
+                }
+            }
         } catch (err) {
-            console.error('[TeamMarks Popup] Refresh folder failed:', err);
-        } finally {
-            btnRefreshFolder.disabled = false;
-            btnRefreshFolder.classList.remove('spinning');
+            console.error('[TeamMarks Popup] Failed to refresh teams/status:', err);
         }
-    });
-
-    // ================================================================
-    // Utilities
-    // ================================================================
-
-    function escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
-    }
-
-    function escapeAttr(text) {
-        return text.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
     // ================================================================
-    // Auto-refresh status
+    // Auto-refresh sync status every 5 seconds
     // ================================================================
-
-    let refreshInterval = null;
 
     function startAutoRefresh() {
-        if (refreshInterval) clearInterval(refreshInterval);
-        refreshInterval = setInterval(async () => {
-            if (!currentSession) return;
+        setInterval(async () => {
+            if (!state.session) return;
             try {
-                syncStatusData = await sendMessage('syncStatus');
-                renderStatus();
+                const statusData = await sendMessage('syncStatus');
+                if (statusData && Array.isArray(statusData.teams)) {
+                    state.syncStatuses = {};
+                    for (const t of statusData.teams) {
+                        state.syncStatuses[t.teamId] = {
+                            connected: t.connected,
+                            lastSync: t.lastSync,
+                            error: t.error
+                        };
+                    }
+                    if (state.teams.length > 0 && !state.pendingConflict) {
+                        renderTeamList();
+                    }
+                }
             } catch (_) {
-                // Silent — popup might be closed
+                // popup may close silently
             }
         }, 5000);
     }
@@ -371,25 +482,24 @@
     // ================================================================
 
     async function init() {
-        showLoading(true);
-        try {
-            await loadSession();
-            showLoading(false);
-            renderAuth();
+        // Loading state
+        popupLoading.style.display = '';
+        authSignedIn.style.display = 'none';
+        authSignedOut.style.display = 'none';
 
-            if (currentSession) {
-                await loadTeamAndStatus();
-                // Load bookmark tree for folder name resolution
-                try {
-                    bookmarkTreeCache = await chrome.bookmarks.getTree();
-                } catch (_) { /* non-critical */ }
-                renderStatus();
-                startAutoRefresh();
+        try {
+            const session = await sendMessage('getSession').catch(() => null);
+            state.session = session || null;
+
+            if (state.session) {
+                await refreshTeamsAndStatus();
             }
         } catch (err) {
-            showLoading(false);
             console.error('[TeamMarks Popup] Init failed:', err);
         }
+
+        render();
+        if (state.session) startAutoRefresh();
     }
 
     init();
