@@ -761,6 +761,34 @@ const TeamManagement = (() => {
         };
     }
 
+    /**
+     * Ensure the [TeamMarks]/<teamName> folder structure exists for a team,
+     * creating it if necessary. Updates the stored folder mapping to point
+     * to the (possibly new) folder.
+     *
+     * Used as a recovery path when fullSync discovers the mapped folder
+     * has been deleted from Chrome bookmarks.
+     *
+     * @param {string} teamId - UUID of the team
+     * @returns {Promise<string>} Chrome folder ID
+     * @throws {Error} If team is not found in the local cache
+     */
+    async function ensureTeamFolder(teamId) {
+        if (!teamId) {
+            throw new Error('[TeamMarks TeamMgmt] ensureTeamFolder: teamId is required.');
+        }
+
+        const team = _teams.find(t => t.id === teamId);
+        if (!team) {
+            throw new Error(`[TeamMarks TeamMgmt] ensureTeamFolder: team not found in cache (${teamId}). Refresh teams first.`);
+        }
+
+        const { folderId } = await _ensureTeamFolder(team.name);
+        await setTeamBookmarksFolder(teamId, folderId);
+        console.info('[TeamMarks TeamMgmt] ensureTeamFolder: folder ready for team', team.name, '→', folderId);
+        return folderId;
+    }
+
     // Return the public API
     return Object.freeze({
         init,
@@ -774,6 +802,7 @@ const TeamManagement = (() => {
         getTeamBookmarksFolder,
         setTeamBookmarksFolder,
         resolveJoinConflict,
-        toggleTeamSync
+        toggleTeamSync,
+        ensureTeamFolder
     });
 })();
