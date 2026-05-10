@@ -1,5 +1,5 @@
 <div align="center">
-    <img src="logo/logo-128.png"/>
+    <img src="logo/favicon-128x128.png"/>
     <h1>TeamMarks</h1>
     <h3>Sync bookmark folders with your team — in real time</h3>
 </div>
