@@ -75,6 +75,11 @@ const SyncEngine = (() => {
     /** @type {Map<string, Promise>} teamId → serial sync queue */
     let _syncQueues = new Map();
 
+    /** @type {Map<string, Promise>} teamId → serial bookmark create queue.
+     * Prevents FK violations when a parent folder's insert hasn't completed
+     * before a child bookmark's insert references it. */
+    let _createQueues = new Map();
+
     // ---------------------------------------------------------------
     // Global state (not per-team)
     // ---------------------------------------------------------------
@@ -241,6 +246,24 @@ const SyncEngine = (() => {
         return next;
     }
 
+    /**
+     * Enqueue a bookmark create operation onto the per-team serial queue.
+     * Ensures parent folder inserts complete before child bookmark inserts,
+     * preventing FK constraint violations on bookmarks.parent_id.
+     *
+     * @param {string} teamId
+     * @param {Function} fn - Async function to run in sequence
+     * @returns {Promise<any>}
+     */
+    function _enqueueCreate(teamId, fn) {
+        const current = _createQueues.get(teamId) || Promise.resolve();
+        const next = current.then(() => fn()).catch(err => {
+            console.error(`[TeamMarks Sync] Queued create failed for team ${teamId}:`, err);
+        });
+        _createQueues.set(teamId, next);
+        return next;
+    }
+
     // ---------------------------------------------------------------
     // Private helpers — ID mapping
     // ---------------------------------------------------------------
@@ -368,15 +391,44 @@ const SyncEngine = (() => {
      * Find which active team (if any) owns the given Chrome bookmark.
      * Checks each active team's root folder ancestry.
      *
+     * If the in-memory Maps are empty (SW restart), this falls back to
+     * chrome.storage.local via TeamManagement to restore team folder
+     * mappings before walking the ancestry. Without this fallback,
+     * ALL local bookmark events are silently dropped after every
+     * MV3 service worker restart.
+     *
      * @param {string} chromeId - The bookmark ID to check
      * @returns {Promise<string|null>} teamId or null
      */
     async function _findTeamForChrome(chromeId) {
-        for (const teamId of _activeTeamIds) {
-            if (await _isInTeamTree(chromeId, teamId)) {
-                return teamId;
+        // Fast path: in-memory maps are populated
+        if (_activeTeamIds.size > 0) {
+            for (const teamId of _activeTeamIds) {
+                if (await _isInTeamTree(chromeId, teamId)) {
+                    return teamId;
+                }
             }
+            return null;
         }
+
+        // Slow path: SW restarted, maps are empty — restore from storage
+        const teams = TeamManagement.getMyTeams();
+        if (!teams || teams.length === 0) return null;
+
+        for (const team of teams) {
+            if (team.sync_enabled === false) continue;
+            try {
+                const folderInfo = await TeamManagement.getTeamBookmarksFolder(team.id);
+                if (folderInfo && folderInfo.chromeFolderId) {
+                    _teamRootFolderIds.set(team.id, folderInfo.chromeFolderId);
+                    _activeTeamIds.add(team.id);
+                    if (await _isInTeamTree(chromeId, team.id)) {
+                        return team.id;
+                    }
+                }
+            } catch (_) { /* best effort — try next team */ }
+        }
+
         return null;
     }
 
@@ -463,6 +515,28 @@ const SyncEngine = (() => {
         return _getChromeId(supabaseParentId) || teamRootFolderId;
     }
 
+    /**
+     * Clamp a desired sort-order index to the valid range for a parent folder.
+     * chrome.bookmarks.move() throws "Index out of bounds" if the index exceeds
+     * the number of children in the target folder. This helper prevents that.
+     *
+     * @param {string} parentId - Chrome bookmark folder ID
+     * @param {number} desiredIndex - The desired sort order index
+     * @returns {Promise<number>} Clamped index (0..children.length)
+     */
+    async function _clampIndex(parentId, desiredIndex) {
+        if (desiredIndex < 0) return 0;
+        try {
+            const children = await chrome.bookmarks.getChildren(parentId);
+            // For moves, the target index must be ≤ children.length
+            // (the moved item is NOT in the children array yet)
+            return Math.min(desiredIndex, children.length);
+        } catch (_) {
+            // If we can't read children, just pass through — Chrome will error if needed
+            return desiredIndex;
+        }
+    }
+
     // ---------------------------------------------------------------
     // Chrome bookmark event handlers (Local → Remote)
     // ---------------------------------------------------------------
@@ -474,7 +548,7 @@ const SyncEngine = (() => {
      * @param {object} bookmark - Chrome bookmark tree node
      */
     async function _onBookmarkCreated(id, bookmark) {
-        if (_activeTeamIds.size === 0) return;
+        console.debug('[TeamMarks Sync] onCreated fired:', id, bookmark.title);
 
         const guarded = await _isEchoGuarded();
         if (guarded) {
@@ -483,7 +557,10 @@ const SyncEngine = (() => {
         }
 
         const teamId = await _findTeamForChrome(id);
-        if (!teamId) return;
+        if (!teamId) {
+            console.debug('[TeamMarks Sync] onCreated — not in any team folder:', id, bookmark.title);
+            return;
+        }
 
         console.info('[TeamMarks Sync] Local bookmark created:', bookmark.title || id);
 
@@ -506,24 +583,39 @@ const SyncEngine = (() => {
                 return;
             }
 
+            // Generate UUID client-side and save the mapping IMMEDIATELY
+            // (before the Supabase insert and before any await). This allows
+            // concurrent child handlers to resolve their parent_id via
+            // _getSupabaseId() even while the parent's insert is queued.
+            const supabaseId = crypto.randomUUID();
+            await _addIdMapping(id, supabaseId);
+
+            // Resolve parent_id NOW while the mapping is fresh.
+            // _chromeBookmarkToSupabase reads _getSupabaseId(parentChromeId)
+            // which returns the parent's UUID (saved above by the parent's
+            // concurrent handler).
             const insertData = _chromeBookmarkToSupabase(bookmark, teamId);
-            const { data, error } = await supabase
-                .from('bookmarks')
-                .insert(insertData)
-                .select()
-                .single();
+            insertData.id = supabaseId;
 
-            if (error) {
-                console.error('[TeamMarks Sync] Failed to push new bookmark:', error);
-                _updateStatus(teamId, { error: error.message });
-                return;
-            }
+            // Serialize the actual Supabase insert per team. This prevents
+            // FK constraint violations: when a folder is created, its children
+            // must wait for the folder's INSERT to complete before their own
+            // INSERT can reference its UUID.
+            _enqueueCreate(teamId, async () => {
+                const { error } = await supabase
+                    .from('bookmarks')
+                    .insert(insertData);
 
-            if (data && data.id) {
-                await _addIdMapping(id, data.id);
-            }
+                if (error) {
+                    // Insert failed — clean up the premature mapping
+                    await _removeIdMappingByChromeId(id);
+                    console.error('[TeamMarks Sync] Failed to push new bookmark:', error);
+                    _updateStatus(teamId, { error: error.message });
+                    return;
+                }
 
-            console.info('[TeamMarks Sync] Pushed bookmark to Supabase:', data?.id);
+                console.info('[TeamMarks Sync] Pushed bookmark to Supabase:', supabaseId);
+            });
         } catch (err) {
             console.error('[TeamMarks Sync] Error in onBookmarkCreated:', err);
             _updateStatus(teamId, { error: err.message });
@@ -537,8 +629,6 @@ const SyncEngine = (() => {
      * @param {object} changeInfo - Object with changed properties (title, url)
      */
     async function _onBookmarkChanged(id, changeInfo) {
-        if (_activeTeamIds.size === 0) return;
-
         const guarded = await _isEchoGuarded();
         if (guarded) {
             console.debug('[TeamMarks Sync] Skipping onChanged (echo guard):', id);
@@ -597,8 +687,6 @@ const SyncEngine = (() => {
      * @param {object} moveInfo - { parentId, index, oldParentId, oldIndex }
      */
     async function _onBookmarkMoved(id, moveInfo) {
-        if (_activeTeamIds.size === 0) return;
-
         const guarded = await _isEchoGuarded();
         if (guarded) {
             console.debug('[TeamMarks Sync] Skipping onMoved (echo guard):', id);
@@ -688,7 +776,22 @@ const SyncEngine = (() => {
      * @param {object} removeInfo - { parentId, index, node }
      */
     async function _onBookmarkRemoved(id, removeInfo) {
-        if (_activeTeamIds.size === 0) return;
+        // Restore team maps from storage if the SW restarted (MV3 ephemeral).
+        // Without this, all local deletions are silently dropped after every restart.
+        if (_activeTeamIds.size === 0) {
+            const teams = TeamManagement.getMyTeams();
+            for (const team of teams) {
+                if (team.sync_enabled === false) continue;
+                try {
+                    const folderInfo = await TeamManagement.getTeamBookmarksFolder(team.id);
+                    if (folderInfo && folderInfo.chromeFolderId) {
+                        _teamRootFolderIds.set(team.id, folderInfo.chromeFolderId);
+                        _activeTeamIds.add(team.id);
+                    }
+                } catch (_) { /* best effort */ }
+            }
+            if (_activeTeamIds.size === 0) return;
+        }
 
         const guarded = await _isEchoGuarded();
         if (guarded) {
@@ -742,8 +845,6 @@ const SyncEngine = (() => {
      * @param {object} reorderInfo - { childIds }
      */
     async function _onBookmarkChildrenReordered(id, reorderInfo) {
-        if (_activeTeamIds.size === 0) return;
-
         const guarded = await _isEchoGuarded();
         if (guarded) {
             console.debug('[TeamMarks Sync] Skipping onChildrenReordered (echo guard):', id);
@@ -888,7 +989,13 @@ const SyncEngine = (() => {
             try {
                 const nodes = await chrome.bookmarks.get(existingChromeId);
                 if (nodes && nodes.length > 0) {
-                    console.debug('[TeamMarks Sync] Local bookmark already exists for:', record.id);
+                    // Bookmark already exists locally via UUID mapping.
+                    // This happens when applyDiff generated a 'create' action
+                    // due to identity key mismatch (e.g. renamed folder), but
+                    // the UUID mapping still connects local→remote. Instead of
+                    // skipping, apply the remote data as an update.
+                    console.debug('[TeamMarks Sync] Local bookmark already mapped — applying remote update:', record.id, record.title);
+                    await _applyRemoteUpdate(record, null, teamId);
                     return;
                 }
             } catch (_) {
@@ -896,21 +1003,40 @@ const SyncEngine = (() => {
             }
         }
 
-        const chromeParentId = _resolveChromeParentId(record.parent_id, teamId);
+        let chromeParentId = _resolveChromeParentId(record.parent_id, teamId);
 
         await _setEchoGuard();
         try {
+            let safeIndex = await _clampIndex(chromeParentId, record.sort_order || 0);
             const createParams = {
                 parentId: chromeParentId,
                 title: record.title || '',
-                index: record.sort_order || 0
+                index: safeIndex
             };
 
             if (!record.is_folder && record.url) {
                 createParams.url = record.url;
             }
 
-            const chromeResult = await chrome.bookmarks.create(createParams);
+            let chromeResult;
+            try {
+                chromeResult = await chrome.bookmarks.create(createParams);
+            } catch (createErr) {
+                // Stale mapping: the resolved parentId points to a Chrome folder
+                // that no longer exists (deleted since the last sync). Clear the
+                // stale mapping and retry at the team root folder.
+                if (createErr.message.includes('find parent bookmark') && record.parent_id) {
+                    console.warn('[TeamMarks Sync] Stale parent mapping for', record.parent_id, '— retrying at team root');
+                    await _removeIdMappingBySupabaseId(record.parent_id);
+                    chromeParentId = _teamRootFolderIds.get(teamId);
+                    createParams.parentId = chromeParentId;
+                    safeIndex = await _clampIndex(chromeParentId, record.sort_order || 0);
+                    createParams.index = safeIndex;
+                    chromeResult = await chrome.bookmarks.create(createParams);
+                } else {
+                    throw createErr;
+                }
+            }
 
             if (chromeResult && chromeResult.id) {
                 await _addIdMapping(chromeResult.id, record.id);
@@ -968,10 +1094,28 @@ const SyncEngine = (() => {
             const newChromeParentId = _resolveChromeParentId(newRecord.parent_id, teamId);
             const currentBookmark = (await chrome.bookmarks.get(chromeId))[0];
             if (currentBookmark.parentId !== newChromeParentId || currentBookmark.index !== newRecord.sort_order) {
-                await chrome.bookmarks.move(chromeId, {
-                    parentId: newChromeParentId,
-                    index: newRecord.sort_order || 0
-                });
+                const safeIndex = await _clampIndex(newChromeParentId, newRecord.sort_order || 0);
+                try {
+                    await chrome.bookmarks.move(chromeId, {
+                        parentId: newChromeParentId,
+                        index: safeIndex
+                    });
+                } catch (moveErr) {
+                    // Stale mapping: the resolved parentId doesn't exist anymore.
+                    // Clear the stale mapping and retry at the team root.
+                    if (moveErr.message.includes('find parent bookmark') && newRecord.parent_id) {
+                        console.warn('[TeamMarks Sync] Stale parent mapping on move, retrying at root:', newRecord.parent_id);
+                        await _removeIdMappingBySupabaseId(newRecord.parent_id);
+                        const rootId = _teamRootFolderIds.get(teamId);
+                        const fallbackIndex = await _clampIndex(rootId, newRecord.sort_order || 0);
+                        await chrome.bookmarks.move(chromeId, {
+                            parentId: rootId,
+                            index: fallbackIndex
+                        });
+                    } else {
+                        throw moveErr;
+                    }
+                }
             }
 
             console.info('[TeamMarks Sync] Updated local bookmark from remote:', chromeId);
@@ -1130,14 +1274,39 @@ const SyncEngine = (() => {
      */
     async function fullSync(teamId) {
         if (!teamId) {
-            console.warn('[TeamMarks Sync] Cannot fullSync — teamId is required.');
-            return;
+            throw new Error('[TeamMarks Sync] Cannot fullSync — teamId is required.');
         }
 
-        const teamRootFolderId = _teamRootFolderIds.get(teamId);
+        let teamRootFolderId = _teamRootFolderIds.get(teamId);
+
+        // Fallback: look up the folder mapping from TeamManagement if not in memory.
+        // The in-memory Map is lost on service worker restart (MV3 ephemeral).
+        // fullSync can be called directly (via manualSync) before startSync
+        // has had a chance to populate the Map.
         if (!teamRootFolderId) {
-            console.warn('[TeamMarks Sync] Cannot fullSync for team', teamId, '— no folder mapped.');
-            return;
+            try {
+                const folderInfo = await TeamManagement.getTeamBookmarksFolder(teamId);
+                if (folderInfo && folderInfo.chromeFolderId) {
+                    teamRootFolderId = folderInfo.chromeFolderId;
+                    _teamRootFolderIds.set(teamId, teamRootFolderId);
+                    console.info('[TeamMarks Sync] Restored folder mapping from storage for team:', teamId);
+                }
+            } catch (err) {
+                console.warn('[TeamMarks Sync] Could not look up folder mapping for team', teamId, ':', err);
+            }
+        }
+
+        if (!teamRootFolderId) {
+            throw new Error(
+                `[TeamMarks Sync] Cannot fullSync for team ${teamId} — no folder mapped. ` +
+                'The team folder may not have been created yet. Toggle sync OFF/ON or re-join the team.'
+            );
+        }
+
+        // Ensure the Supabase client has a valid JWT (critical after SW restart)
+        const userId = _getUserId();
+        if (!userId) {
+            throw new Error('[TeamMarks Sync] Cannot fullSync — not authenticated. Sign in first.');
         }
 
         console.info('[TeamMarks Sync] Starting full sync for team:', teamId);
@@ -1158,7 +1327,9 @@ const SyncEngine = (() => {
                 throw new Error(`Failed to fetch remote bookmarks: ${fetchError.message}`);
             }
 
-            // 2. Get all Chrome bookmarks in the team's sync folder
+            // 2. Get all Chrome bookmarks in the team's sync folder.
+            //    If the folder was deleted (e.g. by the user or Chrome sync),
+            //    attempt to recreate the [TeamMarks]/<teamName> structure.
             let localBookmarks = [];
             try {
                 const subtree = await chrome.bookmarks.getSubTree(teamRootFolderId);
@@ -1166,8 +1337,29 @@ const SyncEngine = (() => {
                     localBookmarks = _flattenBookmarkTree(subtree[0], teamId);
                 }
             } catch (err) {
-                console.error('[TeamMarks Sync] Failed to get local bookmarks:', err);
-                throw new Error(`Failed to read local bookmarks: ${err.message}`);
+                console.warn('[TeamMarks Sync] Team folder not found, attempting recreation:', err.message);
+
+                let recovered = false;
+                try {
+                    const newFolderId = await TeamManagement.ensureTeamFolder(teamId);
+                    teamRootFolderId = newFolderId;
+                    _teamRootFolderIds.set(teamId, newFolderId);
+                    console.info('[TeamMarks Sync] Recreated team folder:', newFolderId);
+
+                    // Retry with the newly created folder (it will be empty, which is fine)
+                    const subtree = await chrome.bookmarks.getSubTree(newFolderId);
+                    if (subtree && subtree.length > 0) {
+                        localBookmarks = _flattenBookmarkTree(subtree[0], teamId);
+                    }
+                    recovered = true;
+                } catch (recreateErr) {
+                    console.error('[TeamMarks Sync] Folder recreation failed:', recreateErr);
+                }
+
+                if (!recovered) {
+                    console.error('[TeamMarks Sync] Failed to get local bookmarks:', err);
+                    throw new Error(`Failed to read local bookmarks: ${err.message}`);
+                }
             }
 
             // 3. Prepare data for ConflictResolver
@@ -1248,21 +1440,47 @@ const SyncEngine = (() => {
                     }
                 }
 
-                // Push local bookmarks that don't exist remotely
-                for (const local of localItems) {
+                // Clear the echo guard BEFORE pushing local bookmarks.
+                // The guard is set to prevent the diff actions (which create/modify
+                // Chrome bookmarks) from re-triggering onCreated/onChanged events
+                // that would loop back to Supabase.  But the push loop below
+                // INTENTIONALLY pushes to Supabase — it MUST NOT be guarded.
+                await _clearEchoGuard();
+
+                // Build a set of remote UUIDs so we can detect stale mappings
+                // (e.g. user cleared the bookmarks table but the ID map still
+                // references old UUIDs that no longer exist).
+                const remoteIdSet = new Set((remoteBookmarks || []).map(bm => bm.id));
+
+                // Push local bookmarks that don't exist remotely (or have stale mappings).
+                // Two passes: folders first, then URLs — ensures parent folders are
+                // created in Supabase before children reference them.
+                const toPush = localItems.filter(local => {
+                    const sid = _getSupabaseId(local.chromeId);
+                    return !sid || !remoteIdSet.has(sid);
+                });
+
+                const foldersToPush = toPush.filter(l => l.isFolder);
+                const urlsToPush = toPush.filter(l => !l.isFolder);
+
+                for (const local of [...foldersToPush, ...urlsToPush]) {
                     const supabaseId = _getSupabaseId(local.chromeId);
-                    if (!supabaseId) {
-                        try {
-                            const nodes = await chrome.bookmarks.get(local.chromeId);
-                            if (nodes && nodes.length > 0) {
-                                if (await _isInTeamTree(local.chromeId, teamId)) {
-                                    await _onBookmarkCreated(local.chromeId, nodes[0]);
-                                }
-                            }
-                        } catch (_) { /* bookmark may have been removed */ }
+                    // Clear stale mapping (mapped to a UUID that doesn't exist remotely)
+                    if (supabaseId && !remoteIdSet.has(supabaseId)) {
+                        console.debug('[TeamMarks Sync] Clearing stale mapping for:', local.chromeId, local.title);
+                        await _removeIdMappingByChromeId(local.chromeId);
                     }
+                    try {
+                        const nodes = await chrome.bookmarks.get(local.chromeId);
+                        if (nodes && nodes.length > 0) {
+                            if (await _isInTeamTree(local.chromeId, teamId)) {
+                                await _onBookmarkCreated(local.chromeId, nodes[0]);
+                            }
+                        }
+                    } catch (_) { /* bookmark may have been removed */ }
                 }
             } finally {
+                // Final cleanup — ensure guard is fully reset even if push loop threw
                 await _clearEchoGuard();
             }
 
@@ -1303,6 +1521,13 @@ const SyncEngine = (() => {
         }
 
         console.info('[TeamMarks Sync] Initializing…');
+
+        // Reset the echo guard in case it was left stuck by a previous
+        // SW instance that was killed mid-operation (MV3 idle termination).
+        _syncWriteDepth = 0;
+        try {
+            await chrome.storage.session.remove(SESSION_KEY_SYNCING);
+        } catch (_) { /* session storage might not be available */ }
 
         // Restore per-team sync timestamps
         try {
@@ -1387,6 +1612,7 @@ const SyncEngine = (() => {
         _isConnected.delete(teamId);
         _lastErrors.delete(teamId);
         _syncQueues.delete(teamId);
+        _createQueues.delete(teamId);
 
         _notifyStatusListeners(getStatus());
         console.info('[TeamMarks Sync] Sync stopped for team:', teamId);

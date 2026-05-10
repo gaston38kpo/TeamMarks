@@ -328,7 +328,9 @@ async function handleMessage(message, sender) {
         }
 
         case 'manualSync': {
-            // Sync all active (sync-enabled) teams, collecting errors per team
+            // Sync all active (sync-enabled) teams, collecting errors per team.
+            // NOTE: SyncEngine.fullSync() now self-resolves the folder mapping
+            // from storage if it was lost after an MV3 service worker restart.
             const teams = TeamManagement.getMyTeams();
             const errors = [];
             for (const team of teams) {
@@ -340,7 +342,15 @@ async function handleMessage(message, sender) {
                 }
             }
             const status = SyncEngine.getStatus();
-            return { success: errors.length === 0, data: status, errors: errors.length > 0 ? errors : undefined };
+            const errorMsg = errors.length > 0
+                ? errors.map(e => `${e.teamId}: ${e.error}`).join('; ')
+                : undefined;
+            return {
+                success: errors.length === 0,
+                data: status,
+                error: errorMsg,
+                errors: errors.length > 0 ? errors : undefined
+            };
         }
 
         // ── Session ────────────────────────────────────────
