@@ -119,7 +119,10 @@ const TeamManagement = (() => {
                 STORAGE_KEY_SYNC_FOLDERS
             ]);
 
-            _teams = result[STORAGE_KEY_TEAMS] || [];
+            _teams = (result[STORAGE_KEY_TEAMS] || []).map(t => ({
+                ...t,
+                sync_enabled: t.sync_enabled ?? true  // legacy rows default to ON
+            }));
             _syncFolders = result[STORAGE_KEY_SYNC_FOLDERS] || {};
 
             console.info('[TeamMarks TeamMgmt] Restored', _teams.length, 'teams from cache.');
@@ -315,7 +318,8 @@ const TeamManagement = (() => {
             name: team.name,
             slug: team.slug,
             invite_code: team.invite_code,
-            role: 'admin'
+            role: 'admin',
+            sync_enabled: true
         });
         await _persistCache();
 
@@ -501,7 +505,8 @@ const TeamManagement = (() => {
             name: row.teams.name,
             slug: row.teams.slug,
             invite_code: row.teams.invite_code,
-            role: row.role
+            role: row.role,
+            sync_enabled: _teams.find(t => t.id === row.teams.id)?.sync_enabled ?? true
         }));
 
         await _persistCache();
@@ -689,6 +694,73 @@ const TeamManagement = (() => {
         return { folderId };
     }
 
+    /**
+     * Toggle sync on/off for a team.
+     *
+     * When enabled=false: sets the flag, persists, calls stopSync.
+     * When enabled=true:  sets the flag, persists, then checks for a folder
+     * mapping.  If _syncFolders[teamId] already exists the folder was already
+     * created — skip conflict detection and start sync directly.  Otherwise
+     * _ensureTeamFolder() checks for a pre-existing local folder.
+     *
+     * @param {string} teamId - UUID of the team
+     * @param {boolean} enabled - Desired toggle state (true=ON, false=OFF)
+     * @returns {Promise<{ needsConflictResolution: boolean, existingFolderId?: string, teamName?: string }>}
+     * @throws {Error} If team is not found in the local cache
+     */
+    async function toggleTeamSync(teamId, enabled) {
+        if (!teamId) {
+            throw new Error('[TeamMarks TeamMgmt] toggleTeamSync: teamId is required.');
+        }
+
+        const idx = _teams.findIndex(t => t.id === teamId);
+        if (idx === -1) {
+            throw new Error('[TeamMarks TeamMgmt] toggleTeamSync: team not found in cache.');
+        }
+
+        const team = _teams[idx];
+        team.sync_enabled = !!enabled;
+        await _persistCache();
+
+        if (!enabled) {
+            // OFF — stop sync, nothing more to do
+            try { await SyncEngine.stopSync(teamId); } catch (err) {
+                console.warn('[TeamMarks TeamMgmt] toggleTeamSync OFF: stopSync failed (non-fatal):', err);
+            }
+            console.info('[TeamMarks TeamMgmt] Sync toggled OFF for team:', team.name);
+            return { needsConflictResolution: false };
+        }
+
+        // ON — start sync if folder already mapped, else detect conflict
+        if (_syncFolders[teamId]) {
+            try { await SyncEngine.startSync(teamId); } catch (err) {
+                console.warn('[TeamMarks TeamMgmt] toggleTeamSync ON: startSync failed (non-fatal):', err);
+            }
+            console.info('[TeamMarks TeamMgmt] Sync toggled ON for team (already mapped):', team.name);
+            return { needsConflictResolution: false };
+        }
+
+        // No folder mapping yet — check for existing local folder
+        const { folderId, existed } = await _ensureTeamFolder(team.name);
+
+        if (!existed) {
+            await setTeamBookmarksFolder(teamId, folderId);
+            try { await SyncEngine.startSync(teamId); } catch (err) {
+                console.warn('[TeamMarks TeamMgmt] toggleTeamSync ON: startSync failed (non-fatal):', err);
+            }
+            console.info('[TeamMarks TeamMgmt] Sync toggled ON for team (new folder):', team.name);
+            return { needsConflictResolution: false };
+        }
+
+        // Conflict — existing local folder, caller must resolve before sync
+        console.info('[TeamMarks TeamMgmt] Toggle ON conflict detected for team:', team.name);
+        return {
+            needsConflictResolution: true,
+            existingFolderId: folderId,
+            teamName: team.name
+        };
+    }
+
     // Return the public API
     return Object.freeze({
         init,
@@ -701,6 +773,7 @@ const TeamManagement = (() => {
         getTeamMembers,
         getTeamBookmarksFolder,
         setTeamBookmarksFolder,
-        resolveJoinConflict
+        resolveJoinConflict,
+        toggleTeamSync
     });
 })();

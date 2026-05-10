@@ -188,6 +188,7 @@
                 : 'team-card__dot';
             const lastSync = status.lastSync ? formatTime(status.lastSync) : 'Nunca';
             const inviteCode = team.invite_code ? escapeHtml(team.invite_code) : '—';
+            const checked = team.sync_enabled !== false ? ' checked' : '';
 
             return `
                 <li class="team-card">
@@ -196,6 +197,10 @@
                         <div class="team-card__name">${escapeHtml(team.name)}</div>
                         <div class="team-card__meta">Código: ${inviteCode} · ${lastSync}</div>
                     </div>
+                    <label class="team-card__toggle" data-team-id="${escapeHtml(team.id)}">
+                        <input type="checkbox"${checked}>
+                        <span class="team-card__toggle-slider"></span>
+                    </label>
                     <button class="team-card__leave" data-team-id="${escapeHtml(team.id)}" data-team-name="${escapeHtml(team.name)}">Salir</button>
                 </li>`;
         }).join('');
@@ -203,6 +208,13 @@
         // Bind leave buttons
         teamList.querySelectorAll('.team-card__leave').forEach(btn => {
             btn.addEventListener('click', () => leaveTeam(btn.dataset.teamId, btn.dataset.teamName));
+        });
+
+        // Bind toggle switches (debounced)
+        teamList.querySelectorAll('.team-card__toggle').forEach(label => {
+            const checkbox = label.querySelector('input');
+            const teamId = label.dataset.teamId;
+            checkbox.addEventListener('change', () => debouncedToggle(teamId, checkbox.checked));
         });
     }
 
@@ -220,6 +232,12 @@
         const radios = conflictBox.querySelectorAll('input[name="conflict-choice"]');
         radios[0].checked = true;
         conflictBox.querySelectorAll('input[name="conflict-replace"]')[0].checked = true;
+
+        // Show cancel link for toggle-triggered conflicts
+        const cancelLink = conflictBox.querySelector('.conflict-box__cancel');
+        if (cancelLink) {
+            cancelLink.style.display = p.fromToggle ? '' : 'none';
+        }
     }
 
     // ================================================================
@@ -261,6 +279,73 @@
             setLoading(btnConfirmConflict, false);
         }
     });
+
+    // Cancel / dismiss conflict (only visible for toggle-triggered conflicts)
+    const cancelConflict = conflictBox.querySelector('.conflict-box__cancel');
+    if (cancelConflict) {
+        cancelConflict.addEventListener('click', async () => {
+            const p = state.pendingConflict;
+            if (!p) return;
+            // Revert the toggle back to OFF
+            try {
+                await sendMessage('toggleTeamSync', { teamId: p.teamId, enabled: false });
+            } catch (_) { /* best effort */ }
+            state.pendingConflict = null;
+            // Update local state
+            const teamIdx = state.teams.findIndex(t => t.id === p.teamId);
+            if (teamIdx !== -1) {
+                state.teams[teamIdx].sync_enabled = false;
+            }
+            await refreshTeamsAndStatus();
+            render();
+        });
+    }
+
+    // ================================================================
+    // Toggle debounce (300ms per team)
+    // ================================================================
+
+    const toggleTimers = {};
+
+    async function handleToggle(teamId, enabled) {
+        clearError();
+        try {
+            const result = await sendMessage('toggleTeamSync', { teamId, enabled });
+
+            if (result && result.needsConflictResolution) {
+                state.pendingConflict = {
+                    teamId,
+                    existingFolderId: result.existingFolderId,
+                    teamName: result.teamName,
+                    fromToggle: true
+                };
+            } else {
+                state.pendingConflict = null;
+            }
+
+            // Update local state
+            const teamIdx = state.teams.findIndex(t => t.id === teamId);
+            if (teamIdx !== -1) {
+                state.teams[teamIdx].sync_enabled = enabled;
+            }
+
+            await refreshTeamsAndStatus();
+            render();
+        } catch (err) {
+            showError('Error al cambiar sincronización: ' + err.message);
+            // Revert the checkbox optimistically
+            const teamIdx = state.teams.findIndex(t => t.id === teamId);
+            if (teamIdx !== -1) {
+                state.teams[teamIdx].sync_enabled = !enabled;
+            }
+            render();
+        }
+    }
+
+    function debouncedToggle(teamId, enabled) {
+        clearTimeout(toggleTimers[teamId]);
+        toggleTimers[teamId] = setTimeout(() => handleToggle(teamId, enabled), 300);
+    }
 
     // ================================================================
     // Sign in / out

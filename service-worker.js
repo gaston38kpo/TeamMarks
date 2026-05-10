@@ -19,6 +19,7 @@
  *   syncStatus          → SyncEngine.getStatus()
  *   manualSync          → SyncEngine.fullSync(teamId) for all active teams
  *   resolveJoinConflict → TeamManagement.resolveJoinConflict(teamId, resolution, existingFolderId, teamName)
+ *   toggleTeamSync      → TeamManagement.toggleTeamSync(teamId, enabled)
  *
  * REMOVED HANDLERS: selectTeam, setSyncFolder, getBookmarkTree,
  *   getTeamFolderTree, getSubscribedFolderIds, subscribeFolder, unsubscribeFolder
@@ -124,15 +125,19 @@ async function initTeamMarks() {
         console.error('[TeamMarks] Sync engine init failed:', err);
     }
 
-    // 4. If authenticated, start sync for all known teams
+    // 4. If authenticated, start sync for all known teams (respect sync_enabled)
     if (session) {
         const teams = TeamManagement.getMyTeams();
         for (const team of teams) {
-            try {
-                await SyncEngine.startSync(team.id);
-                console.info('[TeamMarks] Auto-resumed sync for team:', team.name);
-            } catch (err) {
-                console.error('[TeamMarks] Auto-resume sync failed for team', team.id, ':', err);
+            if (team.sync_enabled !== false) {
+                try {
+                    await SyncEngine.startSync(team.id);
+                    console.info('[TeamMarks] Auto-resumed sync for team:', team.name);
+                } catch (err) {
+                    console.error('[TeamMarks] Auto-resume sync failed for team', team.id, ':', err);
+                }
+            } else {
+                console.info('[TeamMarks] Skipping sync for toggled-off team:', team.name);
             }
         }
     }
@@ -172,6 +177,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
     // Sync each team independently; one failure must not block others
     for (const team of teams) {
+        if (team.sync_enabled === false) continue;
         try {
             await SyncEngine.fullSync(team.id);
             console.info('[TeamMarks] Catch-up sync completed for team:', team.name);
@@ -201,14 +207,16 @@ Auth.onSessionChange(async (session) => {
             console.error('[TeamMarks] Failed to refresh teams on auth:', err);
         }
 
-        // Start sync for all teams
+        // Start sync for all enabled teams
         const teams = TeamManagement.getMyTeams();
         for (const team of teams) {
-            try {
-                await SyncEngine.startSync(team.id);
-                console.info('[TeamMarks] Sync started for team:', team.name);
-            } catch (err) {
-                console.error('[TeamMarks] Failed to start sync for team', team.id, ':', err);
+            if (team.sync_enabled !== false) {
+                try {
+                    await SyncEngine.startSync(team.id);
+                    console.info('[TeamMarks] Sync started for team:', team.name);
+                } catch (err) {
+                    console.error('[TeamMarks] Failed to start sync for team', team.id, ':', err);
+                }
             }
         }
     } else {
@@ -305,6 +313,14 @@ async function handleMessage(message, sender) {
             return { success: true, data: result };
         }
 
+        case 'toggleTeamSync': {
+            if (!message.teamId) {
+                return { success: false, error: 'teamId is required.' };
+            }
+            const result = await TeamManagement.toggleTeamSync(message.teamId, message.enabled);
+            return { success: true, data: result };
+        }
+
         // ── Sync ──────────────────────────────────────────
         case 'syncStatus': {
             const status = SyncEngine.getStatus();
@@ -312,10 +328,11 @@ async function handleMessage(message, sender) {
         }
 
         case 'manualSync': {
-            // Sync all active teams, collecting errors per team
+            // Sync all active (sync-enabled) teams, collecting errors per team
             const teams = TeamManagement.getMyTeams();
             const errors = [];
             for (const team of teams) {
+                if (team.sync_enabled === false) continue;
                 try {
                     await SyncEngine.fullSync(team.id);
                 } catch (err) {
