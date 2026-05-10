@@ -215,40 +215,60 @@ const Auth = (() => {
                 return null;
             }
 
-            if (!_isSessionValid(stored)) {
-                console.info('[TeamMarks Auth] Stored session expired, clearing.');
-                await _clearPersistedSession();
-                _session = null;
-                _notifyListeners(null);
+            const supabase = createSupabaseClient();
+            if (!supabase) {
+                console.warn('[TeamMarks Auth] Cannot restore session — Supabase client unavailable.');
                 return null;
             }
 
-            _session = stored;
-
-            // Hydrate the Supabase client with the stored tokens so that
-            // all DB queries carry the JWT (RLS policies depend on auth.uid()).
-            // Without this, the client has no session after a service worker restart.
-            const supabase = createSupabaseClient();
-            if (supabase) {
+            // Best path: token is still valid, hydrate the Supabase client directly.
+            // This carries the JWT so RLS policies see auth.uid() on every query.
+            if (_isSessionValid(stored)) {
                 try {
                     await supabase.auth.setSession({
                         access_token: stored.accessToken,
                         refresh_token: stored.refreshToken
                     });
+                    _session = stored;
                     console.info('[TeamMarks Auth] Supabase client hydrated from stored session.');
+                    _notifyListeners(_session);
+                    return _session;
                 } catch (hydrateErr) {
-                    console.warn('[TeamMarks Auth] Failed to hydrate Supabase client:', hydrateErr);
-                    // Session might be too stale — clear it
-                    _session = null;
-                    await _clearPersistedSession();
-                    _notifyListeners(null);
-                    return null;
+                    console.warn('[TeamMarks Auth] setSession failed, attempting silent refresh:', hydrateErr);
+                    // Fall through to refresh attempt — do NOT clear the session yet
+                }
+            } else {
+                console.info('[TeamMarks Auth] Stored session expired, attempting silent refresh.');
+            }
+
+            // Token expired or setSession failed — try a silent refresh via Supabase.
+            // This uses the stored refresh_token (no OAuth popup needed).
+            if (stored.refreshToken) {
+                try {
+                    const { data, error } = await supabase.auth.refreshSession({
+                        refresh_token: stored.refreshToken
+                    });
+
+                    if (error) throw error;
+
+                    if (data.session) {
+                        _session = _buildSession(data.session);
+                        await _persistSession();
+                        console.info('[TeamMarks Auth] Session refreshed for', _session.email);
+                        _notifyListeners(_session);
+                        return _session;
+                    }
+                } catch (refreshErr) {
+                    console.warn('[TeamMarks Auth] Silent refresh failed:', refreshErr);
                 }
             }
 
-            console.info('[TeamMarks Auth] Session restored for', stored.email);
-            _notifyListeners(_session);
-            return _session;
+            // Everything failed — clear the session and let the user sign in again.
+            console.info('[TeamMarks Auth] Could not restore or refresh session, clearing.');
+            _session = null;
+            await _clearPersistedSession();
+            _notifyListeners(null);
+            return null;
         } catch (err) {
             console.error('[TeamMarks Auth] Error restoring session:', err);
             _session = null;
@@ -444,29 +464,59 @@ const Auth = (() => {
     }
 
     /**
-     * Attempt a session refresh by re-running the sign-in flow.
-     * If interactive=false, tries a silent (non-interactive) auth flow first.
+     * Attempt a session refresh. First tries a silent refresh via Supabase's
+     * refresh token (no OAuth popup). Falls back to interactive Google OAuth
+     * only when interactive=true and the silent refresh fails.
      *
      * @param {object} [options] - Refresh options
-     * @param {boolean} [options.interactive=false] - Show consent prompt if silent refresh fails
+     * @param {boolean} [options.interactive=false] - Show consent popup if silent refresh fails
      * @returns {Promise<object>} The refreshed session
      * @throws {Error} If refresh fails
      */
     async function refreshSession(options = {}) {
         const interactive = options.interactive || false;
 
-        try {
-            return await signIn({ interactive });
-        } catch (err) {
-            console.error('[TeamMarks Auth] Session refresh failed:', err);
+        // Step 1 — silent refresh via Supabase (no OAuth popup, uses stored refresh_token).
+        // This is the fast path that works as long as the refresh token is still valid.
+        if (_session && _session.refreshToken) {
+            try {
+                const supabase = createSupabaseClient();
+                const { data, error } = await supabase.auth.refreshSession({
+                    refresh_token: _session.refreshToken
+                });
 
-            // If refresh failed, clear the invalid session
-            _session = null;
-            await _clearPersistedSession();
-            _notifyListeners(null);
-
-            throw err;
+                if (!error && data.session) {
+                    _session = _buildSession(data.session);
+                    await _persistSession();
+                    _notifyListeners(_session);
+                    console.info('[TeamMarks Auth] Session refreshed silently.');
+                    return _session;
+                }
+            } catch (silentErr) {
+                console.warn('[TeamMarks Auth] Silent refresh failed:', silentErr);
+                // Fall through to interactive auth if allowed
+            }
         }
+
+        // Step 2 — interactive fallback: full Google OAuth flow.
+        // Only attempted when interactive=true (shows a consent popup).
+        if (interactive) {
+            try {
+                return await signIn({ interactive: true });
+            } catch (err) {
+                console.error('[TeamMarks Auth] Interactive refresh failed:', err);
+
+                // If refresh failed, clear the invalid session
+                _session = null;
+                await _clearPersistedSession();
+                _notifyListeners(null);
+
+                throw err;
+            }
+        }
+
+        // Non-interactive and silent refresh failed — no session available.
+        throw new Error('[TeamMarks Auth] Session refresh failed. User interaction required.');
     }
 
     /**
